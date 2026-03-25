@@ -308,7 +308,7 @@ class TimePresetDialog(QDialog):
 class DownloadSettingsDialog(QDialog):
     """下载设置对话框"""
     def __init__(self, parent=None, thread_count=4, pack_duration=120, delete_original=False,
-                 merge_mode='fast', enable_debug_log=True, skip_transcode=True):
+                 merge_mode='ultra', enable_debug_log=True, skip_transcode=True):
         super().__init__(parent)
         self.setWindowTitle("下载设置")
         self.setMinimumWidth(420)
@@ -317,7 +317,9 @@ class DownloadSettingsDialog(QDialog):
         self._thread_spin.setValue(thread_count)
         self._pack_spin.setValue(pack_duration)
         self._delete_chk.setChecked(delete_original)
-        self._merge_mode_combo.setCurrentIndex(0 if merge_mode == 'fast' else 1)
+        # 设置合并模式下拉框的当前选中项
+        merge_mode_index = {'ultra': 0, 'fast': 1, 'standard': 2}.get(merge_mode, 0)
+        self._merge_mode_combo.setCurrentIndex(merge_mode_index)
         self._debug_log_chk.setChecked(enable_debug_log)
         self._skip_transcode_chk.setChecked(skip_transcode)
 
@@ -342,12 +344,13 @@ class DownloadSettingsDialog(QDialog):
 
         # 合并模式设置
         self._merge_mode_combo = QComboBox()
-        self._merge_mode_combo.addItem("快速模式（不转码，最快）", "fast")
+        self._merge_mode_combo.addItem("极速模式（不转码，无faststart）", "ultra")
+        self._merge_mode_combo.addItem("快速模式（不转码，有faststart）", "fast")
         self._merge_mode_combo.addItem("标准模式（转码合并，兼容性好）", "standard")
-        self._merge_mode_combo.setCurrentIndex(0)  # 默认快速模式
+        self._merge_mode_combo.setCurrentIndex(0)  # 默认极速模式
         layout.addRow("合并模式:", self._merge_mode_combo)
 
-        merge_hint = QLabel("<small>快速模式：不转码直接合并，速度最快<br/>标准模式：转码后合并，兼容性最好</small>")
+        merge_hint = QLabel("<small>极速模式：最快，适合本地播放<br/>快速模式：较快，适合网络播放<br/>标准模式：较慢，兼容性最好</small>")
         merge_hint.setWordWrap(True)
         merge_hint.setStyleSheet("color: #666;")
         layout.addRow("", merge_hint)
@@ -487,7 +490,7 @@ class MainWindow(QMainWindow):
         self._thread_count = 4  # 默认4线程
         self._pack_duration = 120  # 默认120分钟
         self._delete_original = False  # 默认不删除原始文件
-        self._merge_mode = "fast"  # 默认快速合并模式
+        self._merge_mode = "ultra"  # 默认极速合并模式
         self._enable_debug_log = True  # 默认开启调试日志
         self._skip_transcode = True  # 默认跳过转码
         self._dm = DownloadManager(max_concurrent=self._thread_count)
@@ -1514,7 +1517,7 @@ class MainWindow(QMainWindow):
                 self._dm.max_concurrent = self._thread_count
                 print(f"[GUI] 线程数已更新为: {self._thread_count}")
 
-            merge_mode_text = "快速" if self._merge_mode == 'fast' else "标准"
+            merge_mode_text = {'ultra': '极速', 'fast': '快速', 'standard': '标准'}.get(self._merge_mode, '快速')
             debug_text = "开启" if self._enable_debug_log else "关闭"
             transcode_text = "跳过" if self._skip_transcode else "开启"
             self._log_msg(f"设置已更新: {self._thread_count}线程, 打包{self._pack_duration}分钟, "

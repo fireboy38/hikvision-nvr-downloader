@@ -33,10 +33,11 @@ FFMPEG_PATH   = r"C:\tools\ffmpeg\bin\ffmpeg.exe"
 
 # SDK 单文件大小限制阈值（秒）
 # SDK V30 接口限制约 1GB；按 4Mbps 主码流估算约 34分钟 ≈ 2040秒；
-# 为安全起见每段限制为 40分钟 = 2400秒
-SEGMENT_MAX_SECONDS = 40 * 60   # 每段最大时长（秒）
+# 为安全起见每段限制为 55分钟 = 3300秒（接近但不超过1GB）
+SEGMENT_MAX_SECONDS = 55 * 60   # 每段最大时长（秒）
 
 # 合并模式
+MERGE_MODE_ULTRA = "ultra"   # 极速模式：不转码，无faststart（最快）
 MERGE_MODE_FAST = "fast"     # 快速模式：不转码，直接concat
 MERGE_MODE_STANDARD = "standard"  # 标准模式：转码后合并
 
@@ -303,6 +304,70 @@ def _ffmpeg_to_mp4(src: str, dst: str) -> Tuple[bool, str]:
 #  内部：FFmpeg concat 合并多个 MP4 文件
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ffmpeg_concat_ultra(segments: List[str], output: str, merge_points: List[Tuple[str, str]]) -> Tuple[bool, str]:
+    """
+    极速模式：不转码，无faststart（最快）。
+
+    优点：
+    - 速度最快（不重新编码，无faststart开销）
+    - 质量无损（直接copy流）
+    - 适合本地播放场景
+
+    缺点：
+    - 没有faststart，网络播放需要下载完才能播放
+
+    要求：
+    - 所有分段必须格式一致（编码、分辨率、帧率等）
+    """
+    logger.info(f"[合并] 极速模式: {len(segments)} 个分段，无faststart")
+    logger.info(f"[合并] 输出文件: {os.path.basename(output)}")
+
+    concat_list = output + ".concat_list.txt"
+    try:
+        with open(concat_list, "w", encoding="utf-8") as f:
+            for i, seg in enumerate(segments, 1):
+                abs_path = os.path.abspath(seg).replace("\\", "/")
+                f.write(f"file '{abs_path}'\n")
+                logger.debug(f"[合并列表] 分段{i}: {os.path.basename(seg)} ({merge_points[i-1][1]})")
+
+        start_time = time.time()
+        logger.info(f"[合并] 开始极速合并...")
+
+        # 极速模式：无faststart，最快
+        result = subprocess.run(
+            [FFMPEG_PATH, "-y", "-nostats", "-loglevel", "error",
+             "-f", "concat", "-safe", "0", "-i", concat_list,
+             "-c", "copy", "-threads", "4", output],
+            capture_output=True, text=True, encoding='utf-8', errors='ignore',
+            timeout=3600
+        )
+
+        elapsed = time.time() - start_time
+
+        if result.returncode == 0 and os.path.exists(output) and os.path.getsize(output) > 0:
+            size_mb = os.path.getsize(output) / 1024 / 1024
+            logger.info(f"[合并] 极速模式成功! 耗时: {elapsed:.1f}秒, 大小: {size_mb:.1f}MB")
+            if os.path.exists(concat_list):
+                os.remove(concat_list)
+            return True, ""
+        else:
+            error_msg = result.stderr[-500:] if result.stderr else "unknown error"
+            logger.error(f"[合并] 极速模式失败: {error_msg}")
+            if os.path.exists(concat_list):
+                with open(concat_list, "r", encoding="utf-8") as f:
+                    logger.error(f"[合并] Concat列表:\n{f.read()}")
+            if os.path.exists(output):
+                os.remove(output)
+            return False, error_msg
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"[合并] 极速模式超时")
+        return False, "合并超时"
+    except Exception as e:
+        logger.error(f"[合并] 极速模式异常: {e}")
+        return False, str(e)
+
+
 def _ffmpeg_concat_fast(segments: List[str], output: str, merge_points: List[Tuple[str, str]]) -> Tuple[bool, str]:
     """
     快速模式：不转码，直接concat合并（竞业达风格）。
@@ -310,6 +375,7 @@ def _ffmpeg_concat_fast(segments: List[str], output: str, merge_points: List[Tup
     优点：
     - 速度最快（不重新编码）
     - 质量无损（直接copy流）
+    - 有faststart，适合网络播放
 
     要求：
     - 所有分段必须格式一致（编码、分辨率、帧率等）
@@ -334,12 +400,17 @@ def _ffmpeg_concat_fast(segments: List[str], output: str, merge_points: List[Tup
                 logger.debug(f"[合并列表] 分段{i}: {os.path.basename(seg)} ({merge_points[i-1][1]})")
 
         # 快速合并：直接copy流，不转码
+        # 优化参数：
+        # - -threads 4: 使用多线程（虽然copy模式线程收益不大，但某些操作可能受益）
+        # - -nostats: 不输出统计信息，减少IO
+        # - -loglevel error: 只输出错误，减少日志开销
         start_time = time.time()
         logger.info(f"[合并] 开始快速合并...")
 
         result = subprocess.run(
-            [FFMPEG_PATH, "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
-             "-c", "copy", "-movflags", "+faststart", output],
+            [FFMPEG_PATH, "-y", "-nostats", "-loglevel", "error",
+             "-f", "concat", "-safe", "0", "-i", concat_list,
+             "-c", "copy", "-movflags", "+faststart", "-threads", "4", output],
             capture_output=True, text=True, encoding='utf-8', errors='ignore',
             timeout=3600
         )
@@ -563,7 +634,8 @@ def download_with_java(
 
     gui_log(f"开始下载 ch{channel} ({channel_name})  {start_time} ~ {end_time}")
     gui_log(f"时长: {duration_sec/60:.1f} 分钟  目标: {save_path}")
-    gui_log(f"合并模式: {'快速(不转码)' if merge_mode == MERGE_MODE_FAST else '标准(转码)'}")
+    mode_text = {'ultra': '极速(无faststart)', 'fast': '快速(不转码)', 'standard': '标准(转码)'}.get(merge_mode, '快速')
+    gui_log(f"合并模式: {mode_text}")
     if enable_debug_log:
         gui_log(f"调试日志: {log_file}")
 
@@ -755,7 +827,21 @@ def download_with_java(
         gui_log(f"[MERGE] 开始合并 {len(seg_files)} 段...")
 
         # 根据模式选择合并方式
-        if merge_mode == MERGE_MODE_FAST:
+        if merge_mode == MERGE_MODE_ULTRA:
+            # 极速模式：无faststart，最快
+            gui_log(f"[ULTRA] 极速合并模式（无faststart）...")
+            ok_merge, err_merge = _ffmpeg_concat_ultra(seg_files, save_path, merge_points)
+            # 极速模式失败，回退到快速模式
+            if not ok_merge:
+                logger.warning(f"[合并] 极速模式失败，回退到快速模式")
+                gui_log(f"[WARN] 极速合并失败，改用快速模式...")
+                ok_merge, err_merge = _ffmpeg_concat_fast(seg_files, save_path, merge_points)
+            # 快速模式也失败，回退到标准模式
+            if not ok_merge:
+                logger.warning(f"[合并] 快速模式失败，回退到标准模式")
+                gui_log(f"[WARN] 快速合并失败，改用标准模式（转码）...")
+                ok_merge, err_merge = _ffmpeg_concat_standard(seg_files, save_path, merge_points)
+        elif merge_mode == MERGE_MODE_FAST:
             # 快速模式：不转码直接合并
             gui_log(f"[FAST] 快速合并模式（不转码）...")
             ok_merge, err_merge = _ffmpeg_concat_fast(seg_files, save_path, merge_points)
