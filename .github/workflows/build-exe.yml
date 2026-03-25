@@ -9,6 +9,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -67,7 +70,34 @@ jobs:
         name: HikvisionNVRDownloader-Windows
         path: dist/HikvisionNVRDownloader.exe
         
-    - name: Create Release
+    - name: Get current date
+      id: date
+      run: echo "date=$(date +'%Y-%m-%d')" >> $env:GITHUB_OUTPUT
+        
+    - name: Create/Update Nightly Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: nightly
+        name: Nightly Build (${{ steps.date.outputs.date }})
+        body: |
+          自动构建的最新版本
+          
+          构建时间: ${{ steps.date.outputs.date }}
+          提交: ${{ github.sha }}
+          
+          ## 使用方法
+          1. 下载 `HikvisionNVRDownloader.exe`
+          2. 双击运行即可
+          
+          ## 注意
+          这是自动构建版本，可能包含最新但未经充分测试的功能。
+        files: dist/HikvisionNVRDownloader.exe
+        draft: false
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Create Stable Release (on tag)
       if: startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v1
       with:
