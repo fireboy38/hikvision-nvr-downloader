@@ -32,7 +32,6 @@ jobs:
       run: |
         pyinstaller --noconfirm --onefile --windowed `
           --name "HikvisionNVRDownloader" `
-          --add-data "hikvision_downloader/resources;resources" `
           --hidden-import PyQt5 `
           --hidden-import PyQt5.sip `
           --hidden-import requests `
