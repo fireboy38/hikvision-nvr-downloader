@@ -32,6 +32,7 @@ jobs:
       run: |
         pyinstaller --noconfirm --onefile --windowed `
           --name "HikvisionNVRDownloader" `
+          --paths "hikvision_downloader" `
           --hidden-import PyQt5 `
           --hidden-import PyQt5.sip `
           --hidden-import requests `
@@ -49,6 +50,15 @@ jobs:
           --hidden-import pathlib `
           --hidden-import typing `
           --hidden-import dataclasses `
+          --hidden-import gui `
+          --hidden-import gui.main_window `
+          --hidden-import core `
+          --hidden-import core.downloader `
+          --hidden-import core.java_downloader `
+          --hidden-import core.nvr_api `
+          --hidden-import core.hcnetsdk `
+          --hidden-import utils `
+          --hidden-import utils.logger `
           hikvision_downloader/main.py
         
     - name: Upload artifact
