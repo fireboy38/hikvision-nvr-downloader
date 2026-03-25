@@ -105,6 +105,203 @@ class DeviceConfigDialog(QDialog):
 
 
 # ================================================================= #
+#  时间预设管理对话框
+# ================================================================= #
+
+class TimePresetDialog(QDialog):
+    """时间预设管理对话框"""
+    def __init__(self, parent=None, presets: Dict = None):
+        super().__init__(parent)
+        self.setWindowTitle("管理时间预设")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(400)
+        self.presets = presets or {}
+        self._build_ui()
+        self._load_presets()
+    
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        
+        # 说明标签
+        hint = QLabel("自定义常用时间段，如：语文考试、早自习、课间操等")
+        hint.setStyleSheet("color: #666; font-size: 12px;")
+        layout.addWidget(hint)
+        
+        # 预设列表
+        self._list = QListWidget()
+        self._list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._list.itemClicked.connect(self._on_item_selected)
+        layout.addWidget(self._list)
+        
+        # 编辑区域
+        edit_group = QGroupBox("编辑预设")
+        edit_layout = QFormLayout()
+        
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("例如：语文考试")
+        edit_layout.addRow("预设名称:", self._name_edit)
+        
+        self._start_edit = QDateTimeEdit()
+        self._start_edit.setCalendarPopup(True)
+        self._start_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self._start_edit.setDateTime(QDateTime.currentDateTime().addSecs(-3600))
+        edit_layout.addRow("开始时间:", self._start_edit)
+        
+        self._end_edit = QDateTimeEdit()
+        self._end_edit.setCalendarPopup(True)
+        self._end_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self._end_edit.setDateTime(QDateTime.currentDateTime())
+        edit_layout.addRow("结束时间:", self._end_edit)
+        
+        # 快捷设置今天/昨天
+        quick_layout = QHBoxLayout()
+        btn_today = QPushButton("设为今天")
+        btn_today.clicked.connect(lambda: self._set_date_range("today"))
+        quick_layout.addWidget(btn_today)
+        
+        btn_yesterday = QPushButton("设为昨天")
+        btn_yesterday.clicked.connect(lambda: self._set_date_range("yesterday"))
+        quick_layout.addWidget(btn_yesterday)
+        
+        btn_1h = QPushButton("1小时")
+        btn_1h.clicked.connect(lambda: self._set_duration(3600))
+        quick_layout.addWidget(btn_1h)
+        
+        btn_2h = QPushButton("2小时")
+        btn_2h.clicked.connect(lambda: self._set_duration(7200))
+        quick_layout.addWidget(btn_2h)
+        
+        edit_layout.addRow("快捷设置:", quick_layout)
+        
+        edit_group.setLayout(edit_layout)
+        layout.addWidget(edit_group)
+        
+        # 按钮区域
+        btn_layout = QHBoxLayout()
+        
+        self._btn_add = QPushButton("➕ 添加")
+        self._btn_add.clicked.connect(self._add_preset)
+        btn_layout.addWidget(self._btn_add)
+        
+        self._btn_update = QPushButton("💾 保存修改")
+        self._btn_update.clicked.connect(self._update_preset)
+        btn_layout.addWidget(self._btn_update)
+        
+        self._btn_delete = QPushButton("🗑️ 删除")
+        self._btn_delete.clicked.connect(self._delete_preset)
+        btn_layout.addWidget(self._btn_delete)
+        
+        btn_layout.addStretch()
+        
+        self._btn_clear = QPushButton("清空")
+        self._btn_clear.clicked.connect(self._clear_form)
+        btn_layout.addWidget(self._btn_clear)
+        
+        layout.addLayout(btn_layout)
+        
+        # 确定/取消按钮
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+    
+    def _set_date_range(self, preset: str):
+        """设置日期范围"""
+        now = QDateTime.currentDateTime()
+        if preset == "today":
+            self._start_edit.setDateTime(QDateTime(now.date(), QTime(0, 0, 0)))
+            self._end_edit.setDateTime(QDateTime(now.date(), QTime(23, 59, 59)))
+        elif preset == "yesterday":
+            yd = now.date().addDays(-1)
+            self._start_edit.setDateTime(QDateTime(yd, QTime(0, 0, 0)))
+            self._end_edit.setDateTime(QDateTime(yd, QTime(23, 59, 59)))
+    
+    def _set_duration(self, seconds: int):
+        """设置持续时间"""
+        start = self._start_edit.dateTime()
+        self._end_edit.setDateTime(start.addSecs(seconds))
+    
+    def _load_presets(self):
+        """加载预设到列表"""
+        self._list.clear()
+        for name, data in self.presets.items():
+            item = QListWidgetItem(f"{name} ({data['start']} ~ {data['end']})")
+            item.setData(Qt.UserRole, name)
+            self._list.addItem(item)
+    
+    def _on_item_selected(self, item):
+        """选中列表项时填充表单"""
+        name = item.data(Qt.UserRole)
+        if name in self.presets:
+            data = self.presets[name]
+            self._name_edit.setText(name)
+            self._start_edit.setDateTime(QDateTime.fromString(data['start'], "yyyy-MM-dd HH:mm:ss"))
+            self._end_edit.setDateTime(QDateTime.fromString(data['end'], "yyyy-MM-dd HH:mm:ss"))
+    
+    def _add_preset(self):
+        """添加新预设"""
+        name = self._name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "提示", "请输入预设名称")
+            return
+        
+        if name in self.presets:
+            QMessageBox.warning(self, "提示", f"预设 '{name}' 已存在，请使用保存修改")
+            return
+        
+        self.presets[name] = {
+            'start': self._start_edit.dateTime().toString("yyyy-MM-dd HH:mm:ss"),
+            'end': self._end_edit.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+        }
+        self._load_presets()
+        QMessageBox.information(self, "成功", f"已添加预设 '{name}'")
+    
+    def _update_preset(self):
+        """更新现有预设"""
+        name = self._name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "提示", "请输入预设名称")
+            return
+        
+        if name not in self.presets:
+            QMessageBox.warning(self, "提示", f"预设 '{name}' 不存在，请使用添加")
+            return
+        
+        self.presets[name] = {
+            'start': self._start_edit.dateTime().toString("yyyy-MM-dd HH:mm:ss"),
+            'end': self._end_edit.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+        }
+        self._load_presets()
+        QMessageBox.information(self, "成功", f"已更新预设 '{name}'")
+    
+    def _delete_preset(self):
+        """删除预设"""
+        name = self._name_edit.text().strip()
+        if not name or name not in self.presets:
+            QMessageBox.warning(self, "提示", "请先选择要删除的预设")
+            return
+        
+        reply = QMessageBox.question(self, "确认", f"确定要删除预设 '{name}' 吗？",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            del self.presets[name]
+            self._load_presets()
+            self._clear_form()
+    
+    def _clear_form(self):
+        """清空表单"""
+        self._name_edit.clear()
+        self._start_edit.setDateTime(QDateTime.currentDateTime().addSecs(-3600))
+        self._end_edit.setDateTime(QDateTime.currentDateTime())
+        self._list.clearSelection()
+    
+    def get_presets(self) -> Dict:
+        """返回所有预设"""
+        return self.presets
+
+
+# ================================================================= #
 #  设置对话框
 # ================================================================= #
 
@@ -300,6 +497,9 @@ class MainWindow(QMainWindow):
         self._run_log_buffer: List[str] = []
         self._download_log_buffer: List[str] = []
         self._log_view_mode = "run"  # 默认显示运行日志
+        
+        # 时间预设
+        self._time_presets: Dict[str, Dict] = {}  # {名称: {start, end}}
 
         self._load_config()
         self._build_ui()
@@ -354,6 +554,10 @@ class MainWindow(QMainWindow):
         sm = mb.addMenu("设置")
         a = QAction("⚙️ 下载设置", self)
         a.triggered.connect(self._show_download_settings)
+        sm.addAction(a)
+        sm.addSeparator()
+        a = QAction("⏰ 时间预设管理", self)
+        a.triggered.connect(self._manage_time_presets)
         sm.addAction(a)
 
     def _make_toolbar(self):
@@ -475,6 +679,25 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _, p=preset: self._set_time_range(p))
             hb3.addWidget(b)
         tl.addRow(hb3)
+        
+        # 自定义时间预设
+        preset_layout = QHBoxLayout()
+        
+        self._preset_combo = QComboBox()
+        self._preset_combo.setPlaceholderText("选择自定义预设...")
+        self._preset_combo.currentTextChanged.connect(self._on_preset_selected)
+        preset_layout.addWidget(self._preset_combo, 1)
+        
+        btn_manage = QPushButton("⚙️")
+        btn_manage.setToolTip("管理时间预设")
+        btn_manage.setFixedWidth(30)
+        btn_manage.clicked.connect(self._manage_time_presets)
+        preset_layout.addWidget(btn_manage)
+        
+        tl.addRow("自定义预设:", preset_layout)
+        
+        # 刷新预设列表
+        self._refresh_preset_combo()
 
         tg.setLayout(tl)
         vbox.addWidget(tg)
@@ -1230,6 +1453,37 @@ class MainWindow(QMainWindow):
             return
         self._dt_start.setDateTime(s)
         self._dt_end.setDateTime(e)
+    
+    def _refresh_preset_combo(self):
+        """刷新预设下拉列表"""
+        self._preset_combo.clear()
+        self._preset_combo.addItem("选择自定义预设...", "")
+        for name in sorted(self._time_presets.keys()):
+            self._preset_combo.addItem(name, name)
+    
+    def _on_preset_selected(self, text: str):
+        """选择预设时应用时间"""
+        if not text or text == "选择自定义预设...":
+            return
+        
+        if text in self._time_presets:
+            data = self._time_presets[text]
+            start = QDateTime.fromString(data['start'], "yyyy-MM-dd HH:mm:ss")
+            end = QDateTime.fromString(data['end'], "yyyy-MM-dd HH:mm:ss")
+            
+            if start.isValid() and end.isValid():
+                self._dt_start.setDateTime(start)
+                self._dt_end.setDateTime(end)
+                self._log_msg(f"[时间预设] 已应用 '{text}': {data['start']} ~ {data['end']}")
+    
+    def _manage_time_presets(self):
+        """打开时间预设管理对话框"""
+        dlg = TimePresetDialog(self, self._time_presets.copy())
+        if dlg.exec_() == QDialog.Accepted:
+            self._time_presets = dlg.get_presets()
+            self._refresh_preset_combo()
+            self._save_config()
+            self._log_msg(f"[时间预设] 已保存 {len(self._time_presets)} 个预设")
 
     # ------------------------------------------------------------------ #
     #  下载操作
@@ -1670,6 +1924,7 @@ class MainWindow(QMainWindow):
                     cfg = json.load(f)
                     self.devices      = cfg.get('devices', [])
                     self.download_dir = cfg.get('download_dir', self.download_dir)
+                    self._time_presets = cfg.get('time_presets', {})
             except Exception as e:
                 print(f"加载配置失败: {e}")
 
@@ -1682,6 +1937,7 @@ class MainWindow(QMainWindow):
                 json.dump({
                     'devices':      self.devices,
                     'download_dir': self.download_dir,
+                    'time_presets': self._time_presets,
                 }, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"保存配置失败: {e}")
