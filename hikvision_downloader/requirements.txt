@@ -1,0 +1,7 @@
+# 海康NVR批量录像下载工具依赖
+# Hikvision NVR Batch Downloader Requirements
+
+PyQt5>=5.15.0
+requests>=2.25.0
+opencv-python>=4.5.0
+numpy>=1.20.0
