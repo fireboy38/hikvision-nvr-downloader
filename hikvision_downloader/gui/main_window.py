@@ -3,6 +3,7 @@ import sys
 import os
 import json
 import threading
+import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
@@ -12,7 +13,7 @@ from PyQt5.QtWidgets import (
     QSpinBox, QDateTimeEdit, QProgressBar, QTextEdit,
     QGroupBox, QFormLayout, QDialog, QDialogButtonBox, QMessageBox,
     QFileDialog, QStatusBar, QMenuBar, QMenu, QAction, QToolBar,
-    QHeaderView, QAbstractItemView, QSplitter,
+    QHeaderView, QAbstractItemView, QSplitter, QAbstractScrollArea,
     QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem,
     QApplication, QCheckBox, QComboBox,
 )
@@ -307,38 +308,75 @@ class TimePresetDialog(QDialog):
 
 class DownloadSettingsDialog(QDialog):
     """下载设置对话框"""
-    def __init__(self, parent=None, thread_count=4, pack_duration=120, delete_original=False,
-                 merge_mode='ultra', enable_debug_log=True, skip_transcode=True):
+    def __init__(self, parent=None,
+                 total_thread_count=9, per_device_thread_count=3,
+                 merge_mode='standard', enable_debug_log=True, skip_transcode=True,
+                 download_mode='isapi'):
         super().__init__(parent)
         self.setWindowTitle("下载设置")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(450)
         self._build_ui()
 
-        self._thread_spin.setValue(thread_count)
-        self._pack_spin.setValue(pack_duration)
-        self._delete_chk.setChecked(delete_original)
+        self._total_thread_spin.setValue(total_thread_count)
+        self._per_device_thread_spin.setValue(per_device_thread_count)
         # 设置合并模式下拉框的当前选中项
         merge_mode_index = {'ultra': 0, 'fast': 1, 'standard': 2}.get(merge_mode, 0)
         self._merge_mode_combo.setCurrentIndex(merge_mode_index)
         self._debug_log_chk.setChecked(enable_debug_log)
         self._skip_transcode_chk.setChecked(skip_transcode)
+        # 设置下载模式
+        mode_index = {'isapi': 0, 'sdk': 1}.get(download_mode, 0)
+        self._download_mode_combo.setCurrentIndex(mode_index)
 
 
     def _build_ui(self):
         layout = QFormLayout(self)
-        layout.setSpacing(15)
+        layout.setSpacing(12)
 
-        # 线程数设置
-        self._thread_spin = QSpinBox()
-        self._thread_spin.setRange(1, 10)
-        self._thread_spin.setValue(4)  # 默认4线程
-        self._thread_spin.setSuffix(" 线程")
-        layout.addRow("并发线程数:", self._thread_spin)
+        # ===== 下载模式 =====
+        mode_group = QLabel("<b>下载模式</b>")
+        layout.addRow(mode_group)
 
-        thread_hint = QLabel("<small>建议：4线程（最多10线程）<br/>过多线程可能导致NVR响应变慢</small>")
-        thread_hint.setWordWrap(True)
-        thread_hint.setStyleSheet("color: #666;")
-        layout.addRow("", thread_hint)
+        self._download_mode_combo = QComboBox()
+        self._download_mode_combo.addItem("🌐 ISAPI模式（推荐）", "isapi")
+        self._download_mode_combo.addItem("🔌 SDK模式", "sdk")
+        self._download_mode_combo.setCurrentIndex(0)  # 默认ISAPI
+        layout.addRow("下载模式:", self._download_mode_combo)
+
+        mode_hint = QLabel("<small>ISAPI模式：纯HTTP下载，速度快且稳定，无需Java SDK<br/>SDK模式：通过海康HCNetSDK.dll下载，支持分段+合并转码</small>")
+        mode_hint.setWordWrap(True)
+        mode_hint.setStyleSheet("color: #666;")
+        layout.addRow("", mode_hint)
+
+        layout.addRow(QLabel(""))
+
+        # ===== 线程设置 =====
+        thread_group = QLabel("<b>线程设置</b>")
+        layout.addRow(thread_group)
+        
+        # 总下载线程数
+        self._total_thread_spin = QSpinBox()
+        self._total_thread_spin.setRange(1, 20)
+        self._total_thread_spin.setValue(9)  # 默认9线程
+        self._total_thread_spin.setSuffix(" 线程")
+        layout.addRow("总下载线程数:", self._total_thread_spin)
+        
+        total_thread_hint = QLabel("<small>全局下载线程池大小，建议：9线程（1-20）<br/>多台NVR时可提高此值</small>")
+        total_thread_hint.setWordWrap(True)
+        total_thread_hint.setStyleSheet("color: #666;")
+        layout.addRow("", total_thread_hint)
+        
+        # 每台NVR线程数
+        self._per_device_thread_spin = QSpinBox()
+        self._per_device_thread_spin.setRange(1, 6)
+        self._per_device_thread_spin.setValue(3)  # 默认3线程
+        self._per_device_thread_spin.setSuffix(" 线程")
+        layout.addRow("每台NVR并发数:", self._per_device_thread_spin)
+        
+        per_device_hint = QLabel("<small>单台NVR最大并发连接数，建议：3线程（1-6）<br/>海康NVR每用户最多4个SDK连接</small>")
+        per_device_hint.setWordWrap(True)
+        per_device_hint.setStyleSheet("color: #666;")
+        layout.addRow("", per_device_hint)
 
         layout.addRow(QLabel(""))  # 分隔
 
@@ -381,25 +419,6 @@ class DownloadSettingsDialog(QDialog):
         transcode_hint.setStyleSheet("color: #666;")
         layout.addRow("", transcode_hint)
 
-        layout.addRow(QLabel(""))  # 分隔
-
-        # 打包设置
-        self._pack_spin = QSpinBox()
-        self._pack_spin.setRange(0, 720)
-        self._pack_spin.setValue(120)
-        self._pack_spin.setSuffix(" 分钟")
-        self._pack_spin.setSpecialValueText("不打包")
-        layout.addRow("打包时长:", self._pack_spin)
-
-        self._delete_chk = QCheckBox("删除原始文件")
-        layout.addRow("", self._delete_chk)
-
-
-        pack_hint = QLabel("<small>提示：设置为0表示不打包<br/>打包后将多个录像合并为一个文件</small>")
-        pack_hint.setWordWrap(True)
-        pack_hint.setStyleSheet("color: #666;")
-        layout.addRow("", pack_hint)
-
         # 按钮
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -408,13 +427,489 @@ class DownloadSettingsDialog(QDialog):
 
     def get_settings(self):
         return {
-            'thread_count': self._thread_spin.value(),
-            'pack_duration': self._pack_spin.value(),
-            'delete_original': self._delete_chk.isChecked(),
+            'total_thread_count': self._total_thread_spin.value(),
+            'per_device_thread_count': self._per_device_thread_spin.value(),
             'merge_mode': self._merge_mode_combo.currentData(),
             'enable_debug_log': self._debug_log_chk.isChecked(),
-            'skip_transcode': self._skip_transcode_chk.isChecked()
+            'skip_transcode': self._skip_transcode_chk.isChecked(),
+            'download_mode': self._download_mode_combo.currentData(),
         }
+
+
+
+class ChannelInfoDialog(QDialog):
+    """通道信息表格展示对话框，支持导出Excel/CSV"""
+    
+    # OSD更新信号
+    osd_update_signal = pyqtSignal(list, dict)  # osd_updates, device_config
+    
+    def __init__(self, device_name: str, table_data: List[Dict], device_config: dict = None, parent=None):
+        super().__init__(parent)
+        self.device_name = device_name
+        self.table_data = table_data
+        self.device_config = device_config or {}
+        self.setWindowTitle(f"通道信息 - {device_name}")
+        self.setMinimumSize(1400, 600)
+        self.resize(1600, 750)
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 标题
+        title_label = QLabel(f"📹 {self.device_name} - 通道信息 ({len(self.table_data)}个通道)")
+        title_font = QFont()
+        title_font.setPointSize(12)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+        
+        # 统计信息
+        online_count = sum(1 for row in self.table_data if row['online'] == '在线')
+        stats_label = QLabel(f"在线: {online_count} | 离线: {len(self.table_data) - online_count}")
+        stats_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(stats_label)
+        
+        # 表格
+        self.table = QTableWidget()
+        self.table.setColumnCount(16)
+        headers = [
+            "通道号", "通道名称", "在线状态", "IP地址", "协议", "OSD名称",
+            "主码流分辨率", "主码流编码", "主码流码率控制", "主码流码率", "主码流帧率",
+            "子码流分辨率", "子码流编码", "子码流码率控制", "子码流码率", "子码流帧率"
+        ]
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setRowCount(len(self.table_data))
+        
+        # 设置列宽 - 根据内容自适应
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        
+        # 设置最小列宽确保可读性
+        min_widths = [50, 100, 60, 100, 70, 100, 90, 140, 90, 70, 60, 90, 140, 90, 70, 60]
+        for i, width in enumerate(min_widths):
+            self.table.setColumnWidth(i, width)
+        
+        # 填充数据
+        for row_idx, row_data in enumerate(self.table_data):
+            # 通道号
+            item = QTableWidgetItem(str(row_data['channel_no']))
+            item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row_idx, 0, item)
+            
+            # 通道名称
+            self.table.setItem(row_idx, 1, QTableWidgetItem(row_data['channel_name']))
+            
+            # 在线状态（带颜色）
+            online_item = QTableWidgetItem(row_data['online'])
+            online_item.setTextAlignment(Qt.AlignCenter)
+            if row_data['online'] == '在线':
+                online_item.setForeground(QColor(0, 153, 76))  # 绿色
+            else:
+                online_item.setForeground(QColor(232, 17, 35))  # 红色
+            self.table.setItem(row_idx, 2, online_item)
+            
+            # IP地址
+            self.table.setItem(row_idx, 3, QTableWidgetItem(row_data['ip']))
+            
+            # 协议
+            self.table.setItem(row_idx, 4, QTableWidgetItem(row_data['protocol']))
+            
+            # OSD名称
+            self.table.setItem(row_idx, 5, QTableWidgetItem(row_data['osd_name']))
+            
+            # 主码流信息
+            self.table.setItem(row_idx, 6, QTableWidgetItem(row_data['main_resolution']))
+            self.table.setItem(row_idx, 7, QTableWidgetItem(row_data['main_codec']))
+            
+            main_bitrate_mode_item = QTableWidgetItem(row_data['main_bitrate_mode'])
+            main_bitrate_mode_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row_idx, 8, main_bitrate_mode_item)
+            
+            main_bitrate_item = QTableWidgetItem(row_data['main_bitrate'])
+            main_bitrate_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row_idx, 9, main_bitrate_item)
+            
+            main_fps_item = QTableWidgetItem(row_data['main_fps'])
+            main_fps_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row_idx, 10, main_fps_item)
+            
+            # 子码流信息
+            self.table.setItem(row_idx, 11, QTableWidgetItem(row_data['sub_resolution']))
+            self.table.setItem(row_idx, 12, QTableWidgetItem(row_data['sub_codec']))
+            
+            sub_bitrate_mode_item = QTableWidgetItem(row_data['sub_bitrate_mode'])
+            sub_bitrate_mode_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row_idx, 13, sub_bitrate_mode_item)
+            
+            sub_bitrate_item = QTableWidgetItem(row_data['sub_bitrate'])
+            sub_bitrate_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row_idx, 14, sub_bitrate_item)
+            
+            sub_fps_item = QTableWidgetItem(row_data['sub_fps'])
+            sub_fps_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row_idx, 15, sub_fps_item)
+        
+        # 设置表格属性
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        
+        # 禁用水平滚动条，调整表格大小以适应内容
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        
+        # 根据内容调整表格大小
+        self.table.resizeColumnsToContents()
+        
+        layout.addWidget(self.table)
+        
+        # 按钮区域
+        btn_layout = QHBoxLayout()
+        
+        # 导出CSV按钮
+        export_csv_btn = QPushButton("📄 导出CSV")
+        export_csv_btn.setToolTip("导出为CSV格式表格文件")
+        export_csv_btn.clicked.connect(self._export_csv)
+        btn_layout.addWidget(export_csv_btn)
+        
+        # 导出Excel按钮
+        export_excel_btn = QPushButton("📊 导出Excel")
+        export_excel_btn.setToolTip("导出为Excel格式表格文件（需要安装openpyxl）")
+        export_excel_btn.clicked.connect(self._export_excel)
+        btn_layout.addWidget(export_excel_btn)
+        
+        btn_layout.addSpacing(20)
+        
+        # OSD批量操作按钮
+        export_osd_btn = QPushButton("📝 导出OSD")
+        export_osd_btn.setToolTip("导出OSD名称到Excel表格，可编辑后导入")
+        export_osd_btn.clicked.connect(self._export_osd)
+        btn_layout.addWidget(export_osd_btn)
+        
+        import_osd_btn = QPushButton("📥 导入OSD")
+        import_osd_btn.setToolTip("从Excel表格导入OSD名称并批量更新到设备")
+        import_osd_btn.clicked.connect(self._import_osd)
+        btn_layout.addWidget(import_osd_btn)
+        
+        btn_layout.addStretch()
+        
+        # 关闭按钮
+        close_btn = QPushButton("❌ 关闭")
+        close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+    
+    def _export_csv(self):
+        """导出为CSV文件"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出CSV文件", 
+            f"{self.device_name}_通道信息.csv",
+            "CSV文件 (*.csv)"
+        )
+        if not file_path:
+            return
+        
+        try:
+            import csv
+            with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                # 写入表头
+                headers = [
+                    "通道号", "通道名称", "在线状态", "IP地址", "协议", "OSD名称",
+                    "主码流分辨率", "主码流编码", "主码流码率控制", "主码流码率(kbps)", "主码流帧率(fps)",
+                    "子码流分辨率", "子码流编码", "子码流码率控制", "子码流码率(kbps)", "子码流帧率(fps)"
+                ]
+                writer.writerow(headers)
+                # 写入数据
+                for row in self.table_data:
+                    writer.writerow([
+                        row['channel_no'],
+                        row['channel_name'],
+                        row['online'],
+                        row['ip'],
+                        row['protocol'],
+                        row['osd_name'],
+                        row['main_resolution'],
+                        row['main_codec'],
+                        row['main_bitrate_mode'],
+                        row['main_bitrate'],
+                        row['main_fps'],
+                        row['sub_resolution'],
+                        row['sub_codec'],
+                        row['sub_bitrate_mode'],
+                        row['sub_bitrate'],
+                        row['sub_fps'],
+                    ])
+            
+            QMessageBox.information(self, "导出成功", f"已成功导出到:\n{file_path}")
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", f"导出CSV失败:\n{str(e)}")
+    
+    def _export_excel(self):
+        """导出为Excel文件"""
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, Alignment, PatternFill
+            from openpyxl.utils import get_column_letter
+        except ImportError:
+            QMessageBox.warning(
+                self, "缺少依赖", 
+                "导出Excel需要安装openpyxl库\n"
+                "请运行: pip install openpyxl\n\n"
+                "或使用CSV导出功能。"
+            )
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出Excel文件",
+            f"{self.device_name}_通道信息.xlsx",
+            "Excel文件 (*.xlsx)"
+        )
+        if not file_path:
+            return
+        
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "通道信息"
+            
+            # 设置标题
+            ws.merge_cells('A1:P1')
+            title_cell = ws['A1']
+            title_cell.value = f"{self.device_name} - 通道信息"
+            title_cell.font = Font(size=14, bold=True)
+            title_cell.alignment = Alignment(horizontal='center', vertical='center')
+            
+            # 表头
+            headers = [
+                "通道号", "通道名称", "在线状态", "IP地址", "协议", "OSD名称",
+                "主码流分辨率", "主码流编码", "主码流码率控制", "主码流码率(kbps)", "主码流帧率(fps)",
+                "子码流分辨率", "子码流编码", "子码流码率控制", "子码流码率(kbps)", "子码流帧率(fps)"
+            ]
+            header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+            header_font = Font(bold=True, color="FFFFFF")
+            
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=2, column=col, value=header)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            
+            # 数据
+            for row_idx, row_data in enumerate(self.table_data, 3):
+                ws.cell(row=row_idx, column=1, value=row_data['channel_no'])
+                ws.cell(row=row_idx, column=2, value=row_data['channel_name'])
+                ws.cell(row=row_idx, column=3, value=row_data['online'])
+                ws.cell(row=row_idx, column=4, value=row_data['ip'])
+                ws.cell(row=row_idx, column=5, value=row_data['protocol'])
+                ws.cell(row=row_idx, column=6, value=row_data['osd_name'])
+                ws.cell(row=row_idx, column=7, value=row_data['main_resolution'])
+                ws.cell(row=row_idx, column=8, value=row_data['main_codec'])
+                ws.cell(row=row_idx, column=9, value=row_data['main_bitrate_mode'])
+                ws.cell(row=row_idx, column=10, value=int(row_data['main_bitrate'].replace(' kbps', '')) if row_data['main_bitrate'] != '-' else 0)
+                ws.cell(row=row_idx, column=11, value=int(row_data['main_fps']) if row_data['main_fps'] != '-' else 0)
+                ws.cell(row=row_idx, column=12, value=row_data['sub_resolution'])
+                ws.cell(row=row_idx, column=13, value=row_data['sub_codec'])
+                ws.cell(row=row_idx, column=14, value=row_data['sub_bitrate_mode'])
+                ws.cell(row=row_idx, column=15, value=int(row_data['sub_bitrate'].replace(' kbps', '')) if row_data['sub_bitrate'] != '-' else 0)
+                ws.cell(row=row_idx, column=16, value=int(row_data['sub_fps']) if row_data['sub_fps'] != '-' else 0)
+                
+                # 在线状态颜色
+                online_cell = ws.cell(row=row_idx, column=3)
+                if row_data['online'] == '在线':
+                    online_cell.font = Font(color="00B050")  # 绿色
+                else:
+                    online_cell.font = Font(color="FF0000")  # 红色
+            
+            # 调整列宽
+            col_widths = [8, 15, 10, 15, 10, 15, 15, 25, 12, 15, 12, 15, 25, 12, 15, 12]
+            for i, width in enumerate(col_widths, 1):
+                ws.column_dimensions[get_column_letter(i)].width = width
+            
+            wb.save(file_path)
+            QMessageBox.information(self, "导出成功", f"已成功导出到:\n{file_path}")
+            
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", f"导出Excel失败:\n{str(e)}")
+    
+    def _export_osd(self):
+        """导出OSD名称到Excel文件（简化格式，便于编辑）"""
+        # 调试：检查table_data中的OSD数据
+        print(f"[DEBUG] _export_osd: table_data 行数: {len(self.table_data)}")
+        if self.table_data:
+            first_row = self.table_data[0]
+            print(f"[DEBUG] 第一行数据: {first_row}")
+            print(f"[DEBUG] osd_name: '{first_row.get('osd_name', 'NOT_FOUND')}'")
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出OSD文件", 
+            f"{self.device_name}_OSD配置.xlsx",
+            "Excel文件 (*.xlsx)"
+        )
+        if not file_path:
+            return
+        
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+            from openpyxl.utils import get_column_letter
+            
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "OSD配置"
+            
+            # 设置表头样式
+            header_font = Font(bold=True, color="FFFFFF")
+            header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+            header_alignment = Alignment(horizontal="center", vertical="center")
+            thin_border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+            
+            # 写入表头
+            headers = ["通道号", "当前OSD名称", "新OSD名称(在此列修改)"]
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+                cell.border = thin_border
+            
+            # 写入数据
+            for row_idx, row in enumerate(self.table_data, 2):
+                osd_name = row.get('osd_name', '')
+                ws.cell(row=row_idx, column=1, value=row['channel_no']).border = thin_border
+                ws.cell(row=row_idx, column=2, value=osd_name).border = thin_border
+                ws.cell(row=row_idx, column=3, value="").border = thin_border  # 空列供用户填写新名称
+            
+            # 设置列宽
+            ws.column_dimensions['A'].width = 12
+            ws.column_dimensions['B'].width = 30
+            ws.column_dimensions['C'].width = 35
+            
+            # 设置数据行居中对齐
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=3):
+                for cell in row:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+            
+            wb.save(file_path)
+            
+            QMessageBox.information(self, "导出成功", 
+                f"OSD配置已导出到:\n{file_path}\n\n"
+                f"使用说明：\n"
+                f"1. 在'新OSD名称'列填写需要修改的通道名称\n"
+                f"2. 不需要修改的通道请保持该列为空\n"
+                f"3. 保存后使用'导入OSD'功能批量更新到设备\n\n"
+                f"注意：只有填写了新名称的通道才会被更新，\n"
+                f"      为空的通道将保持原名称不变。")
+        except ImportError:
+            QMessageBox.warning(self, "缺少依赖", 
+                "导出Excel需要安装openpyxl库\n"
+                "请运行: pip install openpyxl")
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", f"导出OSD失败:\n{str(e)}")
+    
+    def _import_osd(self):
+        """从Excel文件导入OSD名称并批量更新"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "导入OSD文件",
+            "",
+            "Excel文件 (*.xlsx);;CSV文件 (*.csv)"
+        )
+        if not file_path:
+            return
+        
+        try:
+            osd_updates = []
+            
+            if file_path.lower().endswith('.csv'):
+                # 兼容旧的CSV格式
+                import csv
+                with open(file_path, 'r', encoding='utf-8-sig') as f:
+                    reader = csv.reader(f)
+                    headers = next(reader)  # 跳过表头
+                    
+                    for row in reader:
+                        if len(row) >= 3:
+                            try:
+                                ch_no = int(row[0])
+                                new_osd = row[2].strip()  # 第3列是新OSD名称
+                                if new_osd:  # 只处理填写了新名称的行
+                                    osd_updates.append((ch_no, new_osd))
+                            except (ValueError, IndexError):
+                                continue
+            else:
+                # Excel格式
+                from openpyxl import load_workbook
+                
+                wb = load_workbook(file_path)
+                ws = wb.active
+                
+                # 跳过表头，从第2行开始读取
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if len(row) >= 3:
+                        try:
+                            ch_no = int(row[0]) if row[0] else None
+                            new_osd = str(row[2]).strip() if row[2] else ""
+                            if ch_no and new_osd:  # 只处理填写了新名称的行
+                                osd_updates.append((ch_no, new_osd))
+                        except (ValueError, TypeError):
+                            continue
+            
+            if not osd_updates:
+                QMessageBox.information(self, "提示", "没有找到需要更新的OSD配置\n\n"
+                    "导入规则：\n"
+                    "• 只更新'新OSD名称'列有填写内容的通道\n"
+                    "• 如果'新OSD名称'为空，则跳过该通道（保持原名称不变）")
+                return
+            
+            # 显示将要更新的通道列表
+            update_details = "\n".join([f"  通道{ch}: {name}" for ch, name in osd_updates[:10]])
+            if len(osd_updates) > 10:
+                update_details += f"\n  ... 等共 {len(osd_updates)} 个通道"
+            
+            # 确认对话框
+            reply = QMessageBox.question(
+                self, "确认更新",
+                f"找到 {len(osd_updates)} 个通道的OSD配置需要更新\n\n"
+                f"{update_details}\n\n"
+                f"是否确认批量更新到设备 {self.device_name}?\n\n"
+                f"注意：未填写新OSD名称的通道将保持原名称不变。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply != QMessageBox.Yes:
+                return
+            
+            # 发送信号到主窗口进行批量更新
+            self._start_osd_update(osd_updates)
+            
+        except ImportError:
+            QMessageBox.warning(self, "缺少依赖", 
+                "导入Excel需要安装openpyxl库\n"
+                "请运行: pip install openpyxl")
+        except Exception as e:
+            QMessageBox.warning(self, "导入失败", f"导入OSD失败:\n{str(e)}")
+    
+    def _start_osd_update(self, osd_updates: list):
+        """开始批量更新OSD"""
+        if not self.device_config:
+            QMessageBox.warning(self, "错误", "缺少设备配置信息，无法更新OSD")
+            return
+        
+        # 发送信号到主窗口进行批量更新
+        self.osd_update_signal.emit(osd_updates, self.device_config)
+        
+        QMessageBox.information(self, "提示", 
+            f"OSD更新任务已提交，共 {len(osd_updates)} 个通道\n"
+            f"请在主窗口查看更新进度。")
 
 
 
@@ -474,11 +969,15 @@ class MainWindow(QMainWindow):
     _progress_signal = pyqtSignal(str, int)   # task_id, progress
     _status_signal   = pyqtSignal(str)         # task_id
     _log_signal = pyqtSignal(str)              # log message
+    _size_signal = pyqtSignal(str, int)        # task_id, size_bytes（连接成功后立即更新录像大小）
     _multi_connect_result_signal = pyqtSignal(dict, bool, str, dict, list)  # cfg, ok, msg, dev, channels
+    _show_channel_info_signal = pyqtSignal(str, list)  # device_name, table_data
+    _transcode_progress_signal = pyqtSignal(str, int)  # task_id, transcode_progress (转码进度)
+
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("海康NVR批量录像下载工具 (SDK版)")
+        self.setWindowTitle("海康NVR批量录像下载工具")
         self.setMinimumSize(1280, 820)
 
         self.devices:      List[Dict] = []
@@ -487,13 +986,21 @@ class MainWindow(QMainWindow):
 
         self._current_config: Optional[Dict] = None
         self._connect_worker: Optional[ConnectWorker] = None
-        self._thread_count = 4  # 默认4线程
-        self._pack_duration = 120  # 默认120分钟
-        self._delete_original = False  # 默认不删除原始文件
-        self._merge_mode = "ultra"  # 默认极速合并模式
+        # 线程设置（总线程数和每台NVR线程数分离）
+        self._total_thread_count = 9  # 默认总下载线程数
+        self._per_device_thread_count = 3  # 默认每台NVR并发数
+        
+        self._merge_mode = "fast"  # 默认快速合并模式（不转码，有faststart）
         self._enable_debug_log = True  # 默认开启调试日志
         self._skip_transcode = True  # 默认跳过转码
-        self._dm = DownloadManager(max_concurrent=self._thread_count)
+        self._download_mode = "isapi"  # 下载模式: "isapi"（优先） 或 "sdk"
+        
+        # 初始化下载管理器（总线程9，每台NVR限制3，转码线程2）
+        self._dm = DownloadManager(
+            max_concurrent=self._total_thread_count,
+            max_concurrent_per_device=self._per_device_thread_count,
+            transcode_workers=2
+        )
         self._batch: Optional[BatchDownloader] = None
         
         # 日志缓冲区
@@ -503,6 +1010,17 @@ class MainWindow(QMainWindow):
         
         # 时间预设
         self._time_presets: Dict[str, Dict] = {}  # {名称: {start, end}}
+
+        # 待下载任务列表（加入列表后等待下载的任务）
+        self._pending_tasks: List[DownloadTask] = []
+
+        # ISAPI模式停止事件集合
+        self._isapi_stop_events: Dict[str, 'threading.Event'] = {}
+
+        # 下载速度跟踪
+        self._download_start_times: Dict[str, float] = {}  # {task_id: timestamp}
+        self._downloaded_bytes: Dict[str, int] = {}  # {task_id: bytes} (基于已完成文件大小)
+        self._task_file_sizes: Dict[str, int] = {}   # {task_id: bytes} (录像大小，连接成功后立即更新)
 
         self._load_config()
         self._build_ui()
@@ -553,6 +1071,11 @@ class MainWindow(QMainWindow):
         ex.triggered.connect(self.close)
         fm.addAction(ex)
 
+        # 通道详情
+        a = QAction("📋 通道详情", self)
+        a.triggered.connect(lambda: self._on_query_channel_info_clicked())
+        mb.addAction(a)
+
         # 设置菜单
         sm = mb.addMenu("设置")
         a = QAction("⚙️ 下载设置", self)
@@ -580,21 +1103,34 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        self._btn_start = QPushButton("▶ 开始下载")
-        self._btn_start.clicked.connect(self._start_download)
-        self._btn_start.setEnabled(False)
-        tb.addWidget(self._btn_start)
-
-        self._btn_stop = QPushButton("■ 停止")
-        self._btn_stop.clicked.connect(self._stop_download)
-        self._btn_stop.setEnabled(False)
-        tb.addWidget(self._btn_stop)
+        self._btn_add_tasks = QPushButton("📋 加入列表")
+        self._btn_add_tasks.clicked.connect(self._add_tasks_to_list)
+        self._btn_add_tasks.setEnabled(False)
+        self._btn_add_tasks.setStyleSheet("QPushButton { background-color: #2196F3; color: white; font-weight: bold; padding: 5px 12px; }")
+        tb.addWidget(self._btn_add_tasks)
 
         tb.addSeparator()
 
         self._btn_settings = QPushButton("⚙️ 设置")
         self._btn_settings.clicked.connect(self._show_download_settings)
         tb.addWidget(self._btn_settings)
+
+        # 下载模式切换（ISAPI优先）
+        tb.addSeparator()
+        mode_label = QLabel("  下载模式:")
+        mode_label.setStyleSheet("color: #555; font-weight: bold;")
+        tb.addWidget(mode_label)
+
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("🌐 ISAPI模式（推荐）", "isapi")
+        self._mode_combo.addItem("🔌 SDK模式", "sdk")
+        self._mode_combo.setFixedWidth(180)
+        # 根据当前模式设置选中项
+        idx = 0 if self._download_mode == "isapi" else 1
+        self._mode_combo.setCurrentIndex(idx)
+        self._mode_combo.currentIndexChanged.connect(self._on_download_mode_changed)
+        self._mode_combo.setToolTip("ISAPI模式：纯HTTP下载，无需Java SDK，速度快且稳定\nSDK模式：通过海康HCNetSDK.dll下载，支持分段+合并")
+        tb.addWidget(self._mode_combo)
 
         tb.addSeparator()
 
@@ -639,6 +1175,7 @@ class MainWindow(QMainWindow):
         self._channel_tree.setHeaderLabels(["设备/通道", ""])
         self._channel_tree.setColumnWidth(0, 200)
         self._channel_tree.setColumnHidden(1, True)  # 隐藏第2列
+        self._channel_tree.itemChanged.connect(self._update_main_channel_count)
         cl.addWidget(self._channel_tree)
 
         hb2 = QHBoxLayout()
@@ -648,9 +1185,15 @@ class MainWindow(QMainWindow):
         desel = QPushButton("取消全选")
         desel.clicked.connect(self._deselect_all)
         hb2.addWidget(desel)
+        
+        btn_add = QPushButton("📋 加入列表")
+        btn_add.clicked.connect(self._add_tasks_to_list)
+        btn_add.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
+        hb2.addWidget(btn_add)
+        
         cl.addLayout(hb2)
 
-        self._channel_count_label = QLabel("共 0 个通道")
+        self._channel_count_label = QLabel("共 0 个通道，已选择 0 个")
         self._channel_count_label.setStyleSheet("color:#666;font-size:11px;")
         cl.addWidget(self._channel_count_label)
 
@@ -716,14 +1259,17 @@ class MainWindow(QMainWindow):
         task_l = QVBoxLayout()
 
         self._table = QTableWidget()
-        self._table.setColumnCount(7)
+        self._table.setColumnCount(8)
         self._table.setHorizontalHeaderLabels(
-            ["设备", "通道", "开始时间", "结束时间", "状态", "进度", "文件路径"]
+            ["设备", "通道", "开始时间", "结束时间", "录像大小", "状态", "下载进度", "转码进度"]
         )
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
         self._table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft)
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_context_menu)
+        # 根据当前模式调整表格列
+        self._apply_mode_to_table()
         task_l.addWidget(self._table)
 
         hb = QHBoxLayout()
@@ -731,16 +1277,48 @@ class MainWindow(QMainWindow):
         btn_clear.clicked.connect(self._clear_completed)
         hb.addWidget(btn_clear)
 
-        btn_merge = QPushButton("📦 打包录像")
-        btn_merge.clicked.connect(self._merge_videos)
-        hb.addWidget(btn_merge)
-
         hb.addStretch()
         self._stats_label = QLabel("任务: 0 | 完成: 0 | 失败: 0")
         hb.addWidget(self._stats_label)
         task_l.addLayout(hb)
+
+        # 开始/停止下载按钮行
+        hb_ctrl = QHBoxLayout()
+        self._btn_start = QPushButton("▶ 开始下载")
+        self._btn_start.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; padding: 6px 18px; }")
+        self._btn_start.setEnabled(False)
+        self._btn_start.clicked.connect(self._start_download)
+        hb_ctrl.addWidget(self._btn_start)
+
+        self._btn_stop = QPushButton("■ 停止下载")
+        self._btn_stop.setStyleSheet("QPushButton { background-color: #f44336; color: white; font-weight: bold; padding: 6px 18px; }")
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.clicked.connect(self._stop_download)
+        hb_ctrl.addWidget(self._btn_stop)
+
+        hb_ctrl.addStretch()
+        task_l.addLayout(hb_ctrl)
+
         task_g.setLayout(task_l)
         vbox.addWidget(task_g)
+
+        # 容量信息面板
+        size_g = QGroupBox("📊 容量信息")
+        size_l = QHBoxLayout()
+
+        self._disk_free_label = QLabel("磁盘剩余: --")
+        self._disk_free_label.setStyleSheet("font-size: 13px;")
+        size_l.addWidget(self._disk_free_label)
+
+        size_l.addWidget(self._make_separator())
+
+        self._speed_label = QLabel("下载速度: --")
+        self._speed_label.setStyleSheet("font-size: 13px;")
+        size_l.addWidget(self._speed_label)
+
+        size_l.addStretch()
+        size_g.setLayout(size_l)
+        vbox.addWidget(size_g)
 
         # 日志区域（运行日志 + 下载日志 共用一个文本框）
         log_g = QGroupBox("日志")
@@ -800,14 +1378,22 @@ class MainWindow(QMainWindow):
     def _wire_signals(self):
         print("[GUI] 连接信号...")
         self._progress_signal.connect(self._on_progress_ui)
+        self._transcode_progress_signal.connect(self._on_transcode_progress_ui)
         self._status_signal.connect(self._on_status_ui)
         self._log_signal.connect(self._on_log_signal)
+        self._size_signal.connect(self._update_size_in_table)
         self._multi_connect_result_signal.connect(self._on_multi_connect_result)
+        self._show_channel_info_signal.connect(self._on_show_channel_info)
         
         # 使用显式方法而不是lambda，避免闭包问题
         def on_progress(tid, p):
             print(f"[GUI] 信号发射: tid={tid}, p={p}")
             self._progress_signal.emit(tid, p)
+        
+        def on_transcode_progress(tid, p):
+            """转码进度回调"""
+            print(f"[GUI] 转码进度信号: tid={tid}, p={p}")
+            self._transcode_progress_signal.emit(tid, p)
         
         def on_status(task):
             self._status_signal.emit(task.task_id)
@@ -818,9 +1404,17 @@ class MainWindow(QMainWindow):
             # 通过信号发送到主线程
             self._log_signal.emit(msg)
 
+        def on_completion(task):
+            """SDK下载完成回调 → 转发到主线程日志"""
+            success = task.status == DownloadStatus.COMPLETED
+            QTimer.singleShot(0, lambda: self._on_task_done_bg(
+                task.task_id, success, task.file_path, task.error_message
+            ))
+
         self._dm.set_progress_callback(on_progress)
+        self._dm.set_transcode_progress_callback(on_transcode_progress)
         self._dm.set_status_callback(on_status)
-        self._dm.set_completion_callback(self._on_task_done_bg)
+        self._dm.set_completion_callback(on_completion)
         self._dm.set_log_callback(on_log)
         print("[GUI] 信号连接完成")
     
@@ -833,14 +1427,17 @@ class MainWindow(QMainWindow):
             "分段", "转码", "清理", "临时", "时长", "目标", "调试日志",
             "Progress", "[Java]", "SDK", "录像", "ch", "通道", "合并模式",
             "[OK]", "[SEG]", "[SKIP]", "[WARN]", "[FAIL]", "[CONV]",
-            "✓ 下载完成", "✗ 下载失败"
+            "✓ 下载完成", "✗ 下载失败",
+            # 错误相关关键词
+            "错误", "error", "Error", "失败", "异常", "Exception",
+            "超时", "连接", "登录", "权限", "找不到", "不存在",
+            "❌", "⚠️", "[ERROR]", "[WARN]"
         ]
         
         # 运行日志关键词（这些应该显示在运行日志，而不是下载日志）
         run_keywords = [
             "▶ 开始下载", "■ 已停止", "正在连接", "连接成功", "连接失败",
             "已添加设备", "已删除设备", "保存目录", "设置已更新",
-            "📦 开始打包",
             # 设备查询相关
             "💾 获取到", "硬盘信息", "系统状态", "网络绑定", "物理网卡",
             "查询完成", "查询失败", "查询异常", "盘位", "真实IP",
@@ -943,8 +1540,9 @@ class MainWindow(QMainWindow):
         # 更新通道树显示
         self._populate_channels()
 
-        # 启用开始下载按钮
+        # 启用开始下载按钮和加入列表按钮
         self._btn_start.setEnabled(True)
+        self._btn_add_tasks.setEnabled(True)
 
         sn = dev_info.get('serial', 'Unknown')
         actual_ch = len(channels)
@@ -1221,6 +1819,262 @@ class MainWindow(QMainWindow):
             ))
             log(f"❌ {cfg['name']} 查询异常: {e}")
 
+    def _on_query_channel_info_clicked(self):
+        """菜单点击回调"""
+        self._log_msg("[DEBUG] ========== 菜单被点击 ==========")
+        self._query_channel_info()
+        
+    def _query_channel_info(self):
+        """查询通道详细信息（分辨率、码率、编码等）"""
+        self._log_msg("[DEBUG] _query_channel_info 被调用")
+        
+        selected_rows = [i.row() for i in self._device_list.selectionModel().selectedRows()]
+        self._log_msg(f"[DEBUG] 选中的行: {selected_rows}")
+        
+        if not selected_rows:
+            QMessageBox.information(self, "提示", "请先在设备列表中选择一台设备")
+            return
+        
+        if len(selected_rows) > 1:
+            QMessageBox.information(self, "提示", "请只选择一台设备进行通道信息查询")
+            return
+        
+        cfg = self.devices[selected_rows[0]]
+        self._log_msg(f"🔍 正在查询通道信息: {cfg['name']} ({cfg['host']})...")
+        self._log_msg(f"[DEBUG] 准备启动后台线程，设备配置: {cfg.get('name', 'N/A')}")
+        
+        try:
+            import threading
+            
+            # 包装目标函数以捕获异常
+            def wrapped_query(cfg):
+                try:
+                    self._log_msg("[DEBUG] 线程内: 开始执行 _do_query_channel_info")
+                    self._do_query_channel_info(cfg)
+                    self._log_msg("[DEBUG] 线程内: _do_query_channel_info 执行完成")
+                except Exception as e:
+                    import traceback
+                    self._log_msg(f"[DEBUG] 线程内异常: {e}")
+                    self._log_msg(f"[DEBUG] 线程内异常详情: {traceback.format_exc()}")
+            
+            t = threading.Thread(target=wrapped_query, args=(cfg,), daemon=True)
+            t.start()
+            self._log_msg(f"[DEBUG] 后台线程已启动")
+        except Exception as e:
+            self._log_msg(f"[DEBUG] 启动线程失败: {e}")
+            import traceback
+            self._log_msg(f"[DEBUG] 错误详情: {traceback.format_exc()}")
+
+    def _do_query_channel_info(self, cfg: Dict):
+        """执行通道信息查询（在后台线程）"""
+        # 使用信号发送日志到主线程
+        def log(msg: str):
+            self._log_signal.emit(msg)
+        
+        log(f"[DEBUG] ========== _do_query_channel_info 开始执行 ==========")
+        
+        try:
+            from core.nvr_api import create_isapi
+            
+            log(f"[DEBUG] 开始查询通道信息: {cfg['name']}")
+            
+            api = create_isapi({
+                'host': cfg['host'],
+                'http_port': cfg.get('http_port', 80),
+                'username': cfg.get('username', 'admin'),
+                'password': cfg.get('password', ''),
+            })
+            
+            log(f"[DEBUG] ISAPI对象创建成功")
+            
+            # 获取通道流信息
+            stream_info = api.get_channel_stream_info()
+            log(f"[DEBUG] 获取到 {len(stream_info)} 个通道的流信息")
+            
+            if not stream_info:
+                log(f"⚠️ {cfg['name']}: 未获取到通道流信息")
+                QTimer.singleShot(0, lambda: QMessageBox.warning(
+                    self, "查询失败", f"{cfg['name']}: 未获取到通道流信息"
+                ))
+                return
+            
+            # 获取通道名称和在线状态
+            channels_with_status = api.get_channels_with_status()
+            log(f"[DEBUG] 获取到 {len(channels_with_status)} 个通道的状态信息")
+            
+            # 准备表格数据
+            table_data = []
+            log(f"[DEBUG] 开始构建表格数据，通道数: {len(stream_info)}")
+            
+            for ch_no in sorted(stream_info.keys()):
+                try:
+                    info = stream_info[ch_no]
+                    main_stream = info.get('main_stream', {})
+                    sub_stream = info.get('sub_stream', {})
+                    ch_status = channels_with_status.get(ch_no, {})
+                    
+                    # 构建编码格式显示
+                    def build_codec_display(stream):
+                        if not stream:
+                            return "未配置"
+                        codec = stream.get('codec', 'N/A')
+                        codec_profile = stream.get('codec_profile', '')
+                        smart_codec = stream.get('smart_codec', False)
+                        smart_codec_type = stream.get('smart_codec_type', '')
+                        
+                        display = codec
+                        if codec_profile:
+                            display += f" ({codec_profile})"
+                        if smart_codec:
+                            smart_type_str = f" - {smart_codec_type}" if smart_codec_type else ""
+                            display += f" [Smart{smart_type_str}]"
+                        return display
+                    
+                    # 获取OSD名称 - 对于此NVR，OSD名称就是通道名称
+                    # 因为InputProxy接口没有独立的OSD元素，<name>标签就是OSD显示名称
+                    osd_name = ch_status.get('name', f'通道{ch_no}')
+                    
+                    row = {
+                        'channel_no': ch_no,
+                        'channel_name': ch_status.get('name', f'通道{ch_no}'),
+                        'online': '在线' if ch_status.get('online', False) else '离线',
+                        'ip': ch_status.get('ip', ''),
+                        'protocol': ch_status.get('protocol', '').upper(),
+                        'osd_name': osd_name,
+                        'main_resolution': main_stream.get('resolution', 'N/A') if main_stream else '未配置',
+                        'main_codec': build_codec_display(main_stream),
+                        'main_bitrate_mode': main_stream.get('bitrate_mode', '-') if main_stream else '-',
+                        'main_bitrate': str(main_stream.get('bitrate_kbps', 0)) + ' kbps' if main_stream and main_stream.get('bitrate_kbps', 0) > 0 else '-',
+                        'main_fps': str(main_stream.get('fps', 0)) if main_stream and main_stream.get('fps', 0) > 0 else '-',
+                        'sub_resolution': sub_stream.get('resolution', 'N/A') if sub_stream else '未配置',
+                        'sub_codec': build_codec_display(sub_stream),
+                        'sub_bitrate_mode': sub_stream.get('bitrate_mode', '-') if sub_stream else '-',
+                        'sub_bitrate': str(sub_stream.get('bitrate_kbps', 0)) + ' kbps' if sub_stream and sub_stream.get('bitrate_kbps', 0) > 0 else '-',
+                        'sub_fps': str(sub_stream.get('fps', 0)) if sub_stream and sub_stream.get('fps', 0) > 0 else '-',
+                    }
+                    table_data.append(row)
+                except Exception as row_e:
+                    log(f"[DEBUG] 处理通道 {ch_no} 时出错: {row_e}")
+                    import traceback
+                    log(f"[DEBUG] 错误详情: {traceback.format_exc()}")
+            
+            log(f"[DEBUG] 表格数据构建完成，共 {len(table_data)} 行")
+            
+            # 显示表格对话框（使用默认参数捕获当前值）
+            device_name = cfg['name']
+            log(f"[DEBUG] 准备显示对话框，设备名: {device_name}, 数据行数: {len(table_data)}")
+            
+            if table_data:
+                log(f"[DEBUG] 发送信号显示对话框: {device_name}")
+                self._show_channel_info_signal.emit(device_name, table_data)
+            else:
+                log(f"⚠️ {cfg['name']}: 表格数据为空，无法显示对话框")
+                # 使用信号在主线程显示警告
+                self._log_signal.emit(f"SHOW_WARNING|{cfg['name']}|查询结果为空|未能构建通道信息表格")
+            
+            log(f"✅ {cfg['name']}: 获取到 {len(stream_info)} 个通道的流信息")
+            
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            log(f"❌ {cfg['name']} 查询通道信息异常: {e}")
+            log(f"[DEBUG] 异常详情: {error_detail}")
+            QTimer.singleShot(0, lambda: QMessageBox.warning(
+                self, "查询异常", f"{cfg['name']}: {str(e)}"
+            ))
+
+    def _on_show_channel_info(self, device_name: str, table_data: list):
+        """信号处理：显示通道信息表格对话框"""
+        self._log_msg(f"[DEBUG] _on_show_channel_info 被调用，设备: {device_name}, 数据行数: {len(table_data)}")
+        try:
+            # 查找设备配置
+            device_config = None
+            for dev in self.devices:
+                if dev['name'] == device_name:
+                    device_config = dev
+                    break
+            
+            dialog = ChannelInfoDialog(device_name, table_data, device_config, self)
+            # 连接OSD更新信号
+            dialog.osd_update_signal.connect(self._on_osd_update_requested)
+            self._log_msg("[DEBUG] ChannelInfoDialog 创建成功，准备显示")
+            dialog.exec_()
+            self._log_msg("[DEBUG] ChannelInfoDialog 已关闭")
+        except Exception as e:
+            import traceback
+            self._log_msg(f"[DEBUG] 显示对话框异常: {e}")
+            self._log_msg(f"[DEBUG] 异常详情: {traceback.format_exc()}")
+            QMessageBox.warning(self, "显示失败", f"无法显示通道信息对话框:\n{str(e)}")
+    
+    def _on_osd_update_requested(self, osd_updates: list, device_config: dict):
+        """处理OSD更新请求"""
+        self._log_msg(f"📝 收到OSD更新请求: {device_config.get('name', 'Unknown')}，共 {len(osd_updates)} 个通道")
+        
+        # 启动后台线程进行批量更新
+        threading.Thread(
+            target=self._do_batch_osd_update,
+            args=(osd_updates, device_config),
+            daemon=True
+        ).start()
+    
+    def _do_batch_osd_update(self, osd_updates: list, device_config: dict):
+        """执行批量OSD更新（后台线程）"""
+        def log(msg: str):
+            self._log_signal.emit(msg)
+        
+        try:
+            from core.nvr_api import create_isapi
+            
+            log(f"[OSD] 开始批量更新，设备: {device_config.get('name', 'Unknown')}")
+            
+            api = create_isapi({
+                'host': device_config['host'],
+                'http_port': device_config.get('http_port', 80),
+                'username': device_config.get('username', 'admin'),
+                'password': device_config.get('password', ''),
+            })
+            
+            success_count = 0
+            fail_count = 0
+            
+            for i, (ch_no, osd_name) in enumerate(osd_updates, 1):
+                log(f"[OSD] [{i}/{len(osd_updates)}] 更新通道 {ch_no}: '{osd_name}'")
+                
+                try:
+                    success, msg = api.set_channel_osd(ch_no, osd_name)
+                    if success:
+                        success_count += 1
+                        log(f"✅ 通道{ch_no}: {msg}")
+                    else:
+                        fail_count += 1
+                        log(f"❌ 通道{ch_no}: {msg}")
+                except Exception as e:
+                    fail_count += 1
+                    log(f"❌ 通道{ch_no}: 调用异常 - {str(e)}")
+                
+                # 添加小延迟避免请求过快
+                import time
+                time.sleep(0.2)
+            
+            log(f"[OSD] 批量更新完成: ✅成功 {success_count} 个, ❌失败 {fail_count} 个")
+            
+            # 显示完成提示
+            QTimer.singleShot(0, lambda: QMessageBox.information(
+                self, "OSD更新完成",
+                f"设备: {device_config.get('name', 'Unknown')}\n\n"
+                f"✅ 成功: {success_count} 个\n"
+                f"❌ 失败: {fail_count} 个\n\n"
+                f"请重新查询通道信息以查看更新结果。"
+            ))
+            
+        except Exception as e:
+            import traceback
+            log(f"❌ [OSD] 批量更新异常: {e}")
+            log(f"[DEBUG] 异常详情: {traceback.format_exc()}")
+            QTimer.singleShot(0, lambda: QMessageBox.warning(
+                self, "OSD更新失败", f"批量更新OSD时发生错误:\n{str(e)}"
+            ))
+
     # ------------------------------------------------------------------ #
     #  连接 / 刷新通道
     # ------------------------------------------------------------------ #
@@ -1311,8 +2165,9 @@ class MainWindow(QMainWindow):
             self._device_channels[device_key] = channels
             self._populate_channels()
 
-            # 启用开始下载按钮
+            # 启用开始下载按钮和加入列表按钮
             self._btn_start.setEnabled(True)
+            self._btn_add_tasks.setEnabled(True)
 
             sn = dev.get('serial', 'Unknown')
             actual_ch = len(channels)
@@ -1341,6 +2196,7 @@ class MainWindow(QMainWindow):
         # 更新通道树显示（支持多设备）
         self._populate_channels()
         self._btn_start.setEnabled(True)
+        self._btn_add_tasks.setEnabled(True)
 
         sn = dev_info.get('serial', '')
         # 优先显示ISAPI实际通道数，而非SDK返回的通道数（SDK可能返回设备最大容量128而非实际接入数）
@@ -1380,6 +2236,7 @@ class MainWindow(QMainWindow):
             else:
                 device_item.setText(0, f"📹 {device_name} ({len(channels)}通道, 全部在线)")
             device_item.setExpanded(True)  # 默认展开
+            device_item.setCheckState(0, Qt.Unchecked)  # 设备项也带checkbox，用于批量选择
 
             # 添加通道子节点
             for ch in channels:
@@ -1404,21 +2261,55 @@ class MainWindow(QMainWindow):
 
             total_channels += len(channels)
 
-        self._channel_count_label.setText(f"共 {total_channels} 个通道")
+        self._update_main_channel_count()
+
+    def _update_main_channel_count(self):
+        """更新主窗口通道数量显示（总数和已选择数）"""
+        total = 0
+        selected = 0
+        for i in range(self._channel_tree.topLevelItemCount()):
+            device_item = self._channel_tree.topLevelItem(i)
+            for j in range(device_item.childCount()):
+                total += 1
+                if device_item.child(j).checkState(0) == Qt.Checked:
+                    selected += 1
+        self._channel_count_label.setText(f"共 {total} 个通道，已选择 {selected} 个")
 
     def _select_all(self):
-        """全选所有通道"""
+        """全选通道：优先全选被选中的设备下的通道，若无选中设备则全选所有"""
+        selected_devices = []
         for i in range(self._channel_tree.topLevelItemCount()):
             device_item = self._channel_tree.topLevelItem(i)
+            if device_item.checkState(0) == Qt.Checked:
+                selected_devices.append(device_item)
+
+        # 如果有选中的设备，只全选这些设备下的通道
+        target_devices = selected_devices if selected_devices else [
+            self._channel_tree.topLevelItem(i) for i in range(self._channel_tree.topLevelItemCount())
+        ]
+
+        for device_item in target_devices:
             for j in range(device_item.childCount()):
                 device_item.child(j).setCheckState(0, Qt.Checked)
+        self._update_main_channel_count()
 
     def _deselect_all(self):
-        """取消全选所有通道"""
+        """取消全选：优先取消被选中的设备下的通道，若无选中设备则取消所有"""
+        selected_devices = []
         for i in range(self._channel_tree.topLevelItemCount()):
             device_item = self._channel_tree.topLevelItem(i)
+            if device_item.checkState(0) == Qt.Checked:
+                selected_devices.append(device_item)
+
+        # 如果有选中的设备，只取消这些设备下的通道
+        target_devices = selected_devices if selected_devices else [
+            self._channel_tree.topLevelItem(i) for i in range(self._channel_tree.topLevelItemCount())
+        ]
+
+        for device_item in target_devices:
             for j in range(device_item.childCount()):
                 device_item.child(j).setCheckState(0, Qt.Unchecked)
+        self._update_main_channel_count()
 
     def _get_selected_channels(self) -> List[Dict]:
         """获取所有选中的通道（支持多设备）"""
@@ -1432,6 +2323,162 @@ class MainWindow(QMainWindow):
                     if ch:
                         result.append(ch)
         return result
+
+    # ------------------------------------------------------------------ #
+    #  流信息预加载缓存
+    # ------------------------------------------------------------------ #
+
+    def _add_tasks_to_list(self):
+        """将选中通道加入下载列表"""
+        selected = self._get_selected_channels()
+        if not selected:
+            QMessageBox.warning(self, "提示", "请先勾选至少一个通道")
+            return
+
+        start_dt = self._dt_start.dateTime().toPyDateTime()
+        end_dt   = self._dt_end.dateTime().toPyDateTime()
+        if start_dt >= end_dt:
+            QMessageBox.warning(self, "提示", "开始时间必须早于结束时间")
+            return
+
+        import uuid
+        added_count = 0
+        device_groups = {}
+
+        for ch in selected:
+            device = ch.get('device') or self._current_config
+            if not device:
+                continue
+            device_key = f"{device['host']}:{device.get('port', 8000)}"
+
+            if device_key not in self._device_channels:
+                QMessageBox.warning(self, "提示",
+                    f"设备 {device.get('name', device['host'])} 未连接，请先连接")
+                return
+
+            if device_key not in device_groups:
+                device_groups[device_key] = {
+                    'config': device,
+                    'channels': []
+                }
+            device_groups[device_key]['channels'].append(ch)
+
+        for device_key, group in device_groups.items():
+            device_config = group['config']
+            for ch in group['channels']:
+                task = DownloadTask(
+                    task_id      = str(uuid.uuid4()),
+                    device_id    = device_key,
+                    device_name  = device_config.get('name', device_config['host']),
+                    device_config = device_config,
+                    channel_id   = str(ch.get('no', ch.get('id', '1'))),
+                    channel_name = ch.get('name', f"通道{ch.get('id','?')}"),
+                    start_time   = start_dt,
+                    end_time     = end_dt,
+                    save_dir     = self.download_dir,
+                    merge_mode   = getattr(self, '_merge_mode', 'standard'),
+                    enable_debug_log = getattr(self, '_enable_debug_log', False),
+                    skip_transcode = getattr(self, '_skip_transcode', True),
+                )
+
+                self._pending_tasks.append(task)
+                self._add_row(task)
+                added_count += 1
+
+        # 启用开始下载按钮
+        if self._pending_tasks:
+            self._btn_start.setEnabled(True)
+
+        # 更新磁盘信息
+        self._update_disk_info()
+
+        device_count = len(device_groups)
+        self._log_msg(f"📋 已加入 {added_count} 个下载任务（{device_count}台设备），点击「开始下载」执行")
+
+    def _make_separator(self) -> QWidget:
+        """创建竖线分隔符"""
+        sep = QWidget()
+        sep.setFixedWidth(1)
+        sep.setStyleSheet("background-color: #ccc;")
+        return sep
+
+
+    # ------------------------------------------------------------------ #
+    #  磁盘信息 + 下载速度
+    # ------------------------------------------------------------------ #
+
+    def _update_disk_info(self):
+        """更新磁盘剩余空间显示"""
+        try:
+            import ctypes
+            free_bytes = ctypes.c_ulonglong(0)
+            total_bytes = ctypes.c_ulonglong(0)
+            drive = os.path.splitdrive(self.download_dir)[0] + "\\"
+            ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+                drive, None, ctypes.pointer(total_bytes), ctypes.pointer(free_bytes)
+            )
+            free_gb = free_bytes.value / (1024**3)
+            total_gb = total_bytes.value / (1024**3)
+            self._disk_free_label.setStyleSheet("font-size: 13px; color: #333;")
+            self._disk_free_label.setText(f"磁盘剩余: {free_gb:.1f} GB / {total_gb:.1f} GB")
+        except Exception as e:
+            self._disk_free_label.setText(f"磁盘剩余: 获取失败")
+            self._disk_free_label.setStyleSheet("font-size: 13px; color: #f44336;")
+
+
+
+    def _update_download_speed(self):
+        """计算并显示实时下载速度"""
+        now = time.time()
+        total_speed = 0
+        active_count = 0
+
+        for task_id, start_time in list(self._download_start_times.items()):
+            downloaded = self._downloaded_bytes.get(task_id, 0)
+            if downloaded > 0 and start_time > 0:
+                elapsed = now - start_time
+                if elapsed > 0:
+                    total_speed += downloaded / elapsed
+                    active_count += 1
+
+        if active_count > 0 and total_speed > 0:
+            speed_str = self._format_speed(total_speed)
+            self._speed_label.setText(f"下载速度: {speed_str} ({active_count}任务)")
+            self._speed_label.setStyleSheet("font-size: 13px; color: #2196F3; font-weight: bold;")
+        else:
+            self._speed_label.setText("下载速度: --")
+            self._speed_label.setStyleSheet("font-size: 13px; color: #999;")
+
+    def _apply_mode_to_table(self):
+        """根据当前下载模式调整表格列显示：ISAPI模式隐藏转码进度列"""
+        is_sdk = (self._download_mode != "isapi")
+        self._table.setColumnHidden(7, not is_sdk)  # 第7列：转码进度
+
+    @staticmethod
+    def _format_bytes(num_bytes: int) -> str:
+        """格式化字节数为可读字符串"""
+        if num_bytes <= 0:
+            return "0 B"
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if num_bytes < 1024:
+                if unit == 'B':
+                    return f"{num_bytes:.0f} {unit}"
+                elif unit == 'KB':
+                    return f"{num_bytes:.1f} {unit}"
+                else:
+                    return f"{num_bytes:.2f} {unit}"
+            num_bytes /= 1024
+        return f"{num_bytes:.2f} PB"
+
+    @staticmethod
+    def _format_speed(bytes_per_sec: float) -> str:
+        """格式化下载速度"""
+        if bytes_per_sec < 1024:
+            return f"{bytes_per_sec:.0f} B/s"
+        elif bytes_per_sec < 1024 * 1024:
+            return f"{bytes_per_sec / 1024:.1f} KB/s"
+        else:
+            return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
 
     # ------------------------------------------------------------------ #
     #  时间选择
@@ -1496,32 +2543,59 @@ class MainWindow(QMainWindow):
         """显示下载设置对话框"""
         dlg = DownloadSettingsDialog(
             self,
-            thread_count=self._thread_count,
-            pack_duration=self._pack_duration,
-            delete_original=self._delete_original,
+            total_thread_count=self._total_thread_count,
+            per_device_thread_count=self._per_device_thread_count,
             merge_mode=self._merge_mode,
             enable_debug_log=self._enable_debug_log,
-            skip_transcode=self._skip_transcode
+            skip_transcode=self._skip_transcode,
+            download_mode=self._download_mode,
         )
         if dlg.exec_() == QDialog.Accepted:
             settings = dlg.get_settings()
-            self._thread_count = settings['thread_count']
-            self._pack_duration = settings['pack_duration']
-            self._delete_original = settings['delete_original']
+            self._total_thread_count = settings['total_thread_count']
+            self._per_device_thread_count = settings['per_device_thread_count']
             self._merge_mode = settings['merge_mode']
             self._enable_debug_log = settings['enable_debug_log']
             self._skip_transcode = settings['skip_transcode']
 
-            # 如果下载管理器未运行，更新并发数
+            # 更新下载模式
+            new_mode = settings.get('download_mode', self._download_mode)
+            if new_mode != self._download_mode:
+                old_name = "ISAPI" if self._download_mode == "isapi" else "SDK"
+                self._download_mode = new_mode
+                new_name = "ISAPI" if new_mode == "isapi" else "SDK"
+                # 同步工具栏下拉框
+                idx = 0 if new_mode == "isapi" else 1
+                self._mode_combo.blockSignals(True)
+                self._mode_combo.setCurrentIndex(idx)
+                self._mode_combo.blockSignals(False)
+                self._apply_mode_to_table()
+                self._log_msg(f"🔄 下载模式切换: {old_name} → {new_name}")
+
+            # 如果下载管理器未运行，更新线程配置
             if not self._dm._running:
-                self._dm.max_concurrent = self._thread_count
-                print(f"[GUI] 线程数已更新为: {self._thread_count}")
+                self._dm.max_concurrent = self._total_thread_count
+                self._dm.max_concurrent_per_device = self._per_device_thread_count
 
             merge_mode_text = {'ultra': '极速', 'fast': '快速', 'standard': '标准'}.get(self._merge_mode, '快速')
             debug_text = "开启" if self._enable_debug_log else "关闭"
             transcode_text = "跳过" if self._skip_transcode else "开启"
-            self._log_msg(f"设置已更新: {self._thread_count}线程, 打包{self._pack_duration}分钟, "
+            mode_name = "ISAPI" if self._download_mode == "isapi" else "SDK"
+            self._log_msg(f"设置已更新: 模式:{mode_name}, 总线程{self._total_thread_count}/每NVR{self._per_device_thread_count}, "
                          f"合并模式:{merge_mode_text}, 调试日志:{debug_text}, 转码:{transcode_text}")
+
+    def _on_download_mode_changed(self, index):
+        """工具栏下载模式切换回调"""
+        mode = self._mode_combo.currentData()
+        if mode == self._download_mode:
+            return
+        old_mode = self._download_mode
+        self._download_mode = mode
+        mode_name = "ISAPI" if mode == "isapi" else "SDK"
+        old_name = "ISAPI" if old_mode == "isapi" else "SDK"
+        self._log_msg(f"🔄 下载模式切换: {old_name} → {mode_name}")
+        self._apply_mode_to_table()
+        self._save_config()
 
 
     def _pick_dir(self):
@@ -1533,23 +2607,244 @@ class MainWindow(QMainWindow):
             self._log_msg(f"保存目录: {d}")
 
     def _start_download(self):
-        """开始下载（支持多设备）"""
+        """开始下载：根据当前模式选择不同的下载引擎"""
+        if not self._pending_tasks:
+            # 兼容旧流程：如果没有待下载任务，尝试从当前选中通道创建
+            selected = self._get_selected_channels()
+            if not selected:
+                QMessageBox.warning(self, "提示", "没有待下载的任务，请先勾选通道并点击「加入列表」")
+                return
+            # 直接走旧流程
+            self._start_download_direct()
+            return
+
+        os.makedirs(self.download_dir, exist_ok=True)
+
+        all_tasks = list(self._pending_tasks)
+        self._pending_tasks.clear()
+
+        # 记录下载开始时间
+        now_ts = time.time()
+        for task in all_tasks:
+            self._download_start_times[task.task_id] = now_ts
+            self._downloaded_bytes[task.task_id] = 0
+
+        # 根据模式选择不同的下载引擎
+        if self._download_mode == "isapi":
+            self._start_isapi_download(all_tasks)
+        else:
+            # SDK模式（默认）
+            self._start_sdk_download(all_tasks)
+
+        self._btn_start.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+
+        # 启动下载速度刷新定时器
+        if not hasattr(self, '_speed_timer') or not self._speed_timer.isActive():
+            self._speed_timer = QTimer(self)
+            self._speed_timer.timeout.connect(self._update_download_speed)
+            self._speed_timer.start(2000)  # 每2秒刷新
+
+        # 统计
+        device_keys = set(t.device_id for t in all_tasks)
+        channel_count = len(all_tasks)
+        mode_name = "ISAPI" if self._download_mode == "isapi" else "SDK"
+        self._log_msg(f"▶ 开始下载 [{mode_name}模式] {len(device_keys)}台设备, {channel_count}个通道")
+        self.statusBar().showMessage(f"正在下载 {channel_count} 个任务 [{mode_name}模式]...")
+
+    def _start_sdk_download(self, tasks: List[DownloadTask]):
+        """SDK模式下载：使用DownloadManager（Java SDK + JNA）"""
+        self._dm.add_tasks_batch(tasks)
+        self._dm.max_concurrent = self._total_thread_count
+        self._dm.max_concurrent_per_device = self._per_device_thread_count
+        self._dm.start()
+        # 初始化停止事件集合（SDK模式由DM管理）
+        if not hasattr(self, '_isapi_stop_events'):
+            self._isapi_stop_events = {}
+
+    def _start_isapi_download(self, tasks: List[DownloadTask]):
+        """ISAPI模式下载：使用HikvisionISAPI直接HTTP下载（共用同一个表格）
+        
+        线程控制策略（与SDK模式一致）：
+        - 全局信号量：限制总并发下载数（self._total_thread_count）
+        - 每设备信号量：限制每台NVR并发数（self._per_device_thread_count）
+        """
+        if not hasattr(self, '_isapi_stop_events'):
+            self._isapi_stop_events = {}
+
+        # 创建全局并发信号量（限制总下载线程数）
+        if not hasattr(self, '_isapi_global_sem'):
+            self._isapi_global_sem = threading.Semaphore(self._total_thread_count)
+        else:
+            # 更新信号量容量（如果配置改变则重建）
+            current_val = getattr(self._isapi_global_sem, '_initial_value', None)
+            if current_val != self._total_thread_count:
+                self._isapi_global_sem = threading.Semaphore(self._total_thread_count)
+        self._isapi_global_sem._initial_value = self._total_thread_count
+
+        # 按设备分组，为每台设备创建信号量
+        if not hasattr(self, '_isapi_device_sems'):
+            self._isapi_device_sems = {}
+        for task in tasks:
+            device_id = task.device_id or "unknown"
+            if device_id not in self._isapi_device_sems:
+                sem = threading.Semaphore(self._per_device_thread_count)
+                sem._initial_value = self._per_device_thread_count
+                self._isapi_device_sems[device_id] = sem
+            else:
+                # 更新信号量容量
+                sem = self._isapi_device_sems[device_id]
+                old_val = getattr(sem, '_initial_value', None)
+                if old_val != self._per_device_thread_count:
+                    new_sem = threading.Semaphore(self._per_device_thread_count)
+                    new_sem._initial_value = self._per_device_thread_count
+                    self._isapi_device_sems[device_id] = new_sem
+
+        for task in tasks:
+            config = task.device_config or {}
+            stop_event = threading.Event()
+            self._isapi_stop_events[task.task_id] = stop_event
+
+            # 更新任务状态为等待中
+            task.status = DownloadStatus.PENDING
+            task.progress = 0
+            self._status_signal.emit(task.task_id)
+
+            # 获取该任务的设备信号量
+            device_id = task.device_id or "unknown"
+            device_sem = self._isapi_device_sems[device_id]
+
+            t = threading.Thread(
+                target=self._isapi_download_worker,
+                args=(task, stop_event, self._isapi_global_sem, device_sem),
+                name=f"ISAPI-{task.channel_name}",
+                daemon=True,
+            )
+            t.start()
+
+    def _isapi_download_worker(self, task: DownloadTask, stop_event: threading.Event,
+                                global_sem: threading.Semaphore, device_sem: threading.Semaphore):
+        """ISAPI下载工作线程：下载单个任务并更新表格
+        
+        Args:
+            task: 下载任务
+            stop_event: 停止事件
+            global_sem: 全局并发信号量（限制总线程数）
+            device_sem: 设备并发信号量（限制每NVR线程数）
+        """
+        from core.nvr_api import create_isapi
+        import time as _time
+
+        config = task.device_config or {}
+        channel_no = int(task.channel_id) if task.channel_id.isdigit() else 1
+
+        # 先获取全局信号量（等待全局槽位）
+        if stop_event.is_set():
+            task.status = DownloadStatus.CANCELLED
+            self._status_signal.emit(task.task_id)
+            return
+
+        global_acquired = global_sem.acquire(timeout=600)
+        if not global_acquired:
+            task.status = DownloadStatus.FAILED
+            task.error_message = "等待全局下载槽位超时"
+            self._status_signal.emit(task.task_id)
+            self._log_signal.emit(f"✗ {task.channel_name} - 等待全局下载槽位超时")
+            return
+
+        try:
+            # 再获取设备信号量（等待该NVR的槽位）
+            if stop_event.is_set():
+                task.status = DownloadStatus.CANCELLED
+                self._status_signal.emit(task.task_id)
+                return
+
+            device_acquired = device_sem.acquire(timeout=600)
+            if not device_acquired:
+                task.status = DownloadStatus.FAILED
+                task.error_message = "等待设备下载槽位超时"
+                self._status_signal.emit(task.task_id)
+                self._log_signal.emit(f"✗ {task.channel_name} - 等待设备下载槽位超时")
+                return
+
+            try:
+                # 获得槽位后才标记为下载中
+                task.status = DownloadStatus.DOWNLOADING
+                task.progress = 0
+                self._status_signal.emit(task.task_id)
+
+                api = create_isapi(config)
+
+                def _progress(pct):
+                    task.progress = pct
+                    self._progress_signal.emit(task.task_id, pct)
+
+                def _log(msg):
+                    self._log_signal.emit(f"[{task.channel_name}] {msg}")
+
+                def _size(size_bytes):
+                    """连接成功后立即回调，更新表格中的录像大小"""
+                    self._task_file_sizes[task.task_id] = size_bytes
+                    self._size_signal.emit(task.task_id, size_bytes)
+
+                t0 = _time.time()
+
+                success, msg = api.download_record_by_time(
+                    channel=channel_no,
+                    start_time=task.start_time,
+                    end_time=task.end_time,
+                    save_path=task.file_path,
+                    stream_type=1,
+                    rtsp_port=config.get('rtsp_port', 554),
+                    progress_callback=_progress,
+                    log_callback=_log,
+                    stop_event=stop_event,
+                    size_callback=_size,
+                )
+
+                elapsed = _time.time() - t0
+
+                # 更新任务状态
+                if success:
+                    task.status = DownloadStatus.COMPLETED
+                    task.progress = 100
+                    # 更新实际文件大小和表格显示
+                    if os.path.exists(task.file_path):
+                        actual_size = os.path.getsize(task.file_path)
+                        self._task_file_sizes[task.task_id] = actual_size
+                        self._update_size_in_table(task.task_id, actual_size)
+                    self._log_signal.emit(f"✓ ISAPI下载完成: {task.channel_name} - {msg}, 耗时:{elapsed:.1f}s")
+                else:
+                    task.status = DownloadStatus.FAILED
+                    task.error_message = msg
+                    self._log_signal.emit(f"✗ ISAPI下载失败: {task.channel_name} - {msg}")
+
+                # 通知主线程更新表格状态
+                self._status_signal.emit(task.task_id)
+                # 通知完成
+                self._dm.tasks[task.task_id] = task  # 注册到DM以便表格查询
+                QTimer.singleShot(0, lambda: self._on_task_done_bg(task.task_id, success, task.file_path, msg))
+
+            except Exception as e:
+                task.status = DownloadStatus.FAILED
+                task.error_message = str(e)
+                self._status_signal.emit(task.task_id)
+                self._log_signal.emit(f"✗ ISAPI下载异常: {task.channel_name} - {str(e)}")
+                self._dm.tasks[task.task_id] = task
+                QTimer.singleShot(0, lambda: self._on_task_done_bg(task.task_id, False, "", str(e)))
+            finally:
+                # 释放设备信号量
+                device_sem.release()
+        finally:
+            # 释放全局信号量
+            global_sem.release()
+
+
+    def _start_download_direct(self):
+        """直接下载（兼容旧流程：不经过加入列表，直接从选中通道下载）"""
         selected = self._get_selected_channels()
         if not selected:
             QMessageBox.warning(self, "提示", "请先勾选至少一个通道")
-            return
-
-        # 检查是否有未连接的设备
-        devices_to_connect = set()
-        for ch in selected:
-            if 'device' in ch:
-                device_key = f"{ch['device']['host']}:{ch['device'].get('port', 8000)}"
-                if device_key not in self._device_channels:
-                    devices_to_connect.add(ch['device']['name'])
-
-        if devices_to_connect:
-            msg = f"以下设备未连接，请先连接：\n" + "\n".join(f"  - {name}" for name in devices_to_connect)
-            QMessageBox.warning(self, "提示", msg)
             return
 
         start_dt = self._dt_start.dateTime().toPyDateTime()
@@ -1560,14 +2855,20 @@ class MainWindow(QMainWindow):
 
         os.makedirs(self.download_dir, exist_ok=True)
 
-        # 按设备分组创建任务
         import uuid
         all_tasks = []
         device_groups = {}
 
         for ch in selected:
-            device = ch['device']
+            device = ch.get('device') or self._current_config
+            if not device:
+                continue
             device_key = f"{device['host']}:{device.get('port', 8000)}"
+
+            if device_key not in self._device_channels:
+                QMessageBox.warning(self, "提示",
+                    f"设备 {device.get('name', device['host'])} 未连接，请先连接")
+                return
 
             if device_key not in device_groups:
                 device_groups[device_key] = {
@@ -1576,17 +2877,14 @@ class MainWindow(QMainWindow):
                 }
             device_groups[device_key]['channels'].append(ch)
 
-        # 为每个设备创建任务
         for device_key, group in device_groups.items():
             device_config = group['config']
-            channels = group['channels']
-
-            for ch in channels:
+            for ch in group['channels']:
                 task = DownloadTask(
                     task_id      = str(uuid.uuid4()),
-                    device_id    = f"{device_config['host']}:{device_config.get('port',8000)}",
+                    device_id    = device_key,
                     device_name  = device_config.get('name', device_config['host']),
-                    device_config = device_config,  # 传递设备配置
+                    device_config = device_config,
                     channel_id   = str(ch.get('no', ch.get('id', '1'))),
                     channel_name = ch.get('name', f"通道{ch.get('id','?')}"),
                     start_time   = start_dt,
@@ -1596,31 +2894,151 @@ class MainWindow(QMainWindow):
                     enable_debug_log = getattr(self, '_enable_debug_log', False),
                     skip_transcode = getattr(self, '_skip_transcode', True),
                 )
-
                 all_tasks.append(task)
                 self._add_row(task)
 
-        # 提交所有任务
-        self._dm.add_tasks_batch(all_tasks)
+        # 记录下载开始时间
+        now_ts = time.time()
+        for task in all_tasks:
+            self._download_start_times[task.task_id] = now_ts
+            self._downloaded_bytes[task.task_id] = 0
 
-        # 启动下载（使用第一个已连接设备的配置作为示例）
-        # 注意：由于每个任务都包含设备配置，下载管理器会自动使用对应的设备配置
-        self._dm.max_concurrent = self._thread_count
-        self._dm.start()  # 设备配置从任务中读取，无需传入
+        # 根据模式选择下载引擎
+        if self._download_mode == "isapi":
+            self._start_isapi_download(all_tasks)
+        else:
+            self._dm.add_tasks_batch(all_tasks)
+            self._dm.max_concurrent = self._total_thread_count
+            self._dm.max_concurrent_per_device = self._per_device_thread_count
+            self._dm.start()
 
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
 
-        # 统计设备数和通道数
+        # 启动下载速度刷新定时器
+        if not hasattr(self, '_speed_timer') or not self._speed_timer.isActive():
+            self._speed_timer = QTimer(self)
+            self._speed_timer.timeout.connect(self._update_download_speed)
+            self._speed_timer.start(2000)
+
         device_count = len(device_groups)
         channel_count = len(selected)
-        self._log_msg(f"▶ 开始下载 {device_count}台设备, {channel_count}个通道, {self._thread_count}线程")
+        mode_name = "ISAPI" if self._download_mode == "isapi" else "SDK"
+        self._log_msg(f"▶ 开始下载 [{mode_name}模式] {device_count}台设备, {channel_count}个通道, 总线程{self._total_thread_count}/每NVR{self._per_device_thread_count}")
 
     def _stop_download(self):
+        # 停止SDK下载管理器
         self._dm.stop()
+
+        # 停止ISAPI下载任务
+        if hasattr(self, '_isapi_stop_events'):
+            for task_id, stop_event in self._isapi_stop_events.items():
+                stop_event.set()
+            self._isapi_stop_events.clear()
+
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        # 停止速度刷新定时器
+        if hasattr(self, '_speed_timer') and self._speed_timer.isActive():
+            self._speed_timer.stop()
+        self._speed_label.setText("下载速度: --")
+        self._speed_label.setStyleSheet("font-size: 13px; color: #999;")
         self._log_msg("■ 已停止下载")
+        self.statusBar().showMessage("已停止下载")
+
+    def _on_table_context_menu(self, pos):
+        """下载表格右键菜单"""
+        row = self._table.rowAt(pos.y())
+        if row < 0:
+            return
+
+        item0 = self._table.item(row, 0)
+        if not item0:
+            return
+        task_id = item0.data(Qt.UserRole)
+        # 先从 DownloadManager 查找，找不到再从 _pending_tasks 查找
+        task = self._dm.get_task(task_id)
+        if not task:
+            task = next((t for t in self._pending_tasks if t.task_id == task_id), None)
+        if not task:
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { font-size: 13px; padding: 4px; }
+            QMenu::item { padding: 6px 24px; }
+            QMenu::item:disabled { color: #aaa; }
+        """)
+
+        # 停止按钮：仅对等待中或下载中的任务可用
+        can_stop = task.status in (DownloadStatus.PENDING, DownloadStatus.DOWNLOADING)
+        action_stop = menu.addAction("⏹ 停止此任务")
+        action_stop.setEnabled(can_stop)
+        action_stop.triggered.connect(lambda checked, tid=task_id, t=task: self._stop_single_task(tid, t))
+
+        menu.addSeparator()
+
+        # 删除按钮：仅对非下载中的任务可用
+        can_delete = task.status != DownloadStatus.DOWNLOADING
+        action_delete = menu.addAction("🗑 删除此任务")
+        action_delete.setEnabled(can_delete)
+        action_delete.triggered.connect(lambda checked, tid=task_id, t=task: self._delete_single_task(tid, t))
+
+        menu.exec_(self._table.viewport().mapToGlobal(pos))
+
+    def _stop_single_task(self, task_id: str, task: DownloadTask):
+        """停止单个下载任务"""
+        # 从待下载列表中移除（如果还在的话）
+        self._pending_tasks = [t for t in self._pending_tasks if t.task_id != task_id]
+
+        if task.status == DownloadStatus.PENDING:
+            # SDK模式取消
+            self._dm.cancel_task(task_id)
+            self._status_signal.emit(task_id)
+            self._log_msg(f"⏹ 已停止任务: {task.channel_name}")
+        elif task.status == DownloadStatus.DOWNLOADING:
+            # 下载中：通过ISAPI停止事件标记停止
+            if task_id in self._isapi_stop_events:
+                self._isapi_stop_events[task_id].set()
+            # SDK模式也标记取消
+            self._dm.cancel_task_downloading(task_id)
+            self._status_signal.emit(task_id)
+            self._log_msg(f"⏹ 正在停止任务: {task.channel_name}")
+
+        self._update_stats()
+
+    def _delete_single_task(self, task_id: str, task: DownloadTask):
+        """删除单个任务（从列表中移除）"""
+        # 如果正在下载，先停止
+        if task.status == DownloadStatus.DOWNLOADING:
+            if task_id in self._isapi_stop_events:
+                self._isapi_stop_events[task_id].set()
+            self._dm.cancel_task_downloading(task_id)
+
+        # 从待下载列表中移除
+        self._pending_tasks = [t for t in self._pending_tasks if t.task_id != task_id]
+
+        # 从DownloadManager中移除
+        self._dm.remove_task(task_id)
+
+        # 从表格中删除行
+        row = self._find_row(task_id)
+        if row >= 0:
+            self._table.removeRow(row)
+
+        # 清理相关跟踪数据
+        self._task_file_sizes.pop(task_id, None)
+        self._downloaded_bytes.pop(task_id, None)
+        self._download_start_times.pop(task_id, None)
+        self._isapi_stop_events.pop(task_id, None)
+
+        self._log_msg(f"🗑 已删除任务: {task.channel_name}")
+        self._update_stats()
+
+        # 如果表格为空，启用开始按钮但禁用停止按钮
+        if self._table.rowCount() == 0:
+            self._btn_start.setEnabled(len(self._pending_tasks) > 0)
+            self._btn_stop.setEnabled(False)
 
     def _clear_completed(self):
         self._dm.clear_completed()
@@ -1628,103 +3046,6 @@ class MainWindow(QMainWindow):
         for t in self._dm.get_all_tasks():
             self._add_row(t)
         self._update_stats()
-
-    def _merge_videos(self):
-        """合并已下载的录像文件"""
-        pack_duration = self._pack_duration
-        delete_original = self._delete_original
-
-        if pack_duration == 0:
-            QMessageBox.information(self, "提示", "请先设置打包时长（设置为0表示不打包）")
-            return
-
-        # 获取下载目录
-        download_dir = self.download_dir
-        if not os.path.exists(download_dir):
-            QMessageBox.warning(self, "错误", f"下载目录不存在: {download_dir}")
-            return
-
-        # 确认操作
-        reply = QMessageBox.question(
-            self,
-            "确认打包",
-            f"即将合并目录中的所有录像文件\n\n"
-            f"打包时长: {pack_duration} 分钟\n"
-            f"删除原始文件: {'是' if delete_original else '否'}\n\n"
-            f"是否继续？",
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply == QMessageBox.No:
-            return
-
-        self._log_msg(f"📦 开始打包录像 (时长: {pack_duration}分钟)...")
-
-        try:
-            from core.video_merger import merge_channel_videos
-
-            # 按通道分组文件
-            from pathlib import Path
-            files_by_channel = {}
-            for f in Path(download_dir).glob('*.mp4'):
-                # 从文件名提取通道信息
-                # 文件名格式: 设备_通道_日期_时段.mp4
-                parts = f.stem.split('_')
-                if len(parts) >= 2:
-                    channel_name = parts[1]
-                    if channel_name not in files_by_channel:
-                        files_by_channel[channel_name] = []
-                    files_by_channel[channel_name].append(str(f))
-
-            if not files_by_channel:
-                QMessageBox.warning(self, "提示", "下载目录中没有找到视频文件")
-                return
-
-            # 合并每个通道的文件
-            merged_files = []
-            for channel_name, files in files_by_channel.items():
-                self._log_msg(f"  处理通道: {channel_name} ({len(files)} 个文件)")
-
-                # 按文件名排序
-                files.sort()
-
-                # 使用video_merger的分组合并功能
-                from core.video_merger import group_videos_by_duration, merge_videos
-                groups = group_videos_by_duration(files, pack_duration)
-
-                for i, group in enumerate(groups):
-                    output_file = os.path.join(
-                        download_dir,
-                        f"{channel_name}_pack{i+1}.mp4"
-                    )
-                    self._log_msg(f"    合并组 {i+1}: {len(group)} 个文件")
-
-                    success = merge_videos(group, output_file)
-                    if success:
-                        merged_files.append(output_file)
-                        self._log_msg(f"    ✅ 合并成功: {os.path.basename(output_file)}")
-
-                        if delete_original:
-                            # 删除原始文件
-                            for f in group:
-                                try:
-                                    os.remove(f)
-                                except Exception as e:
-                                    self._log_msg(f"    ⚠ 删除失败: {os.path.basename(f)}")
-                    else:
-                        self._log_msg(f"    ❌ 合并失败")
-
-            QMessageBox.information(
-                self,
-                "打包完成",
-                f"成功合并 {len(merged_files)} 个文件\n\n"
-                f"文件保存在: {download_dir}"
-            )
-            self._log_msg(f"✅ 打包完成: {len(merged_files)} 个文件")
-
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"打包失败: {str(e)}")
-            self._log_msg(f"❌ 打包失败: {e}")
 
     # ------------------------------------------------------------------ #
     #  任务表格
@@ -1744,19 +3065,29 @@ class MainWindow(QMainWindow):
         self._table.setItem(row, 2, item(task.start_time.strftime("%m-%d %H:%M")))
         self._table.setItem(row, 3, item(task.end_time.strftime("%m-%d %H:%M")))
 
+        # 录像大小（第4列）- 下载完成后显示
+        size_item = item("—")
+        size_item.setForeground(QColor(128, 128, 128))
+        self._table.setItem(row, 4, size_item)
+
         status_item = QTableWidgetItem(STATUS_TEXT[task.status])
         status_item.setForeground(STATUS_COLORS[task.status])
-        self._table.setItem(row, 4, status_item)
+        self._table.setItem(row, 5, status_item)
 
-        bar = QProgressBar()
-        bar.setRange(0, 100)
-        bar.setValue(task.progress)
-        bar.setTextVisible(True)
-        self._table.setCellWidget(row, 5, bar)
+        # 下载进度条（第6列）
+        download_bar = QProgressBar()
+        download_bar.setRange(0, 100)
+        download_bar.setValue(task.progress)
+        download_bar.setTextVisible(True)
+        self._table.setCellWidget(row, 6, download_bar)
 
-        file_item = item(task.file_path)
-        file_item.setData(Qt.UserRole, task.task_id)
-        self._table.setItem(row, 6, file_item)
+        # 转码进度条（第7列）- 仅SDK模式显示
+        if self._download_mode != "isapi":
+            transcode_bar = QProgressBar()
+            transcode_bar.setRange(0, 100)
+            transcode_bar.setValue(0)
+            transcode_bar.setTextVisible(True)
+            self._table.setCellWidget(row, 7, transcode_bar)
 
         # 在第0列存task_id
         self._table.item(row, 0).setData(Qt.UserRole, task.task_id)
@@ -1768,22 +3099,38 @@ class MainWindow(QMainWindow):
                 return r
         return -1
 
+
     # ------------------------------------------------------------------ #
     #  回调槽（主线程）
     # ------------------------------------------------------------------ #
 
-    def _on_progress_ui(self, task_id: str, progress: int):
-        print(f"[GUI] 收到进度更新: task_id={task_id}, progress={progress}")
+    def _update_size_in_table(self, task_id: str, size_bytes: int):
+        """下载完成后更新表格中的录像大小列"""
         row = self._find_row(task_id)
-        print(f"[GUI] 查找行: row={row}")
         if row >= 0:
-            bar = self._table.cellWidget(row, 5)
+            item = self._table.item(row, 4)
+            if item:
+                size_str = self._format_bytes(size_bytes)
+                item.setText(size_str)
+                item.setForeground(QColor(51, 51, 51))
+
+    def _on_progress_ui(self, task_id: str, progress: int):
+        """下载进度更新"""
+        row = self._find_row(task_id)
+        if row >= 0:
+            bar = self._table.cellWidget(row, 6)  # 第6列：下载进度
             if bar:
                 bar.setValue(progress)
                 bar.setFormat(f"{progress}%")
-                print(f"[GUI] 进度条已更新: {progress}%")
-            else:
-                print("[GUI] 进度条widget不存在")
+
+    def _on_transcode_progress_ui(self, task_id: str, progress: int):
+        """转码进度更新"""
+        row = self._find_row(task_id)
+        if row >= 0:
+            bar = self._table.cellWidget(row, 7)  # 第7列：转码进度
+            if bar:
+                bar.setValue(progress)
+                bar.setFormat(f"{progress}%")
 
     def _on_status_ui(self, task_id: str):
         task = self._dm.get_task(task_id)
@@ -1791,11 +3138,13 @@ class MainWindow(QMainWindow):
             return
         row = self._find_row(task_id)
         if row >= 0:
-            si = self._table.item(row, 4)
+            si = self._table.item(row, 5)
             if si:
                 si.setText(STATUS_TEXT[task.status])
                 si.setForeground(STATUS_COLORS[task.status])
         self._update_stats()
+        # 更新状态栏
+        self._update_status_bar_from_tasks()
 
     def _on_task_done_bg(self, task_id: str, success: bool, file_path: str, error_message: str):
         """后台线程回调 → 转发到主线程日志"""
@@ -1805,16 +3154,68 @@ class MainWindow(QMainWindow):
         icon = "✅" if success else "❌"
         msg  = f"{icon} {task.channel_name}: {STATUS_TEXT[task.status]}"
         if error_message:
-            msg += f"  ({error_message})"
+            msg += f"  (错误: {error_message})"
+        # 失败时同时输出到运行日志和下载日志，确保能看到错误信息
         QTimer.singleShot(0, lambda: self._log_msg(msg))
+        QTimer.singleShot(0, lambda: self._log_download(msg))
         QTimer.singleShot(0, self._update_stats)
+        # 清理速度跟踪数据
+        QTimer.singleShot(0, lambda: self._cleanup_speed_tracking(task_id, success, file_path))
+
+    def _cleanup_speed_tracking(self, task_id: str, success: bool, file_path: str):
+        """清理单个任务的速度跟踪数据"""
+        self._download_start_times.pop(task_id, None)
+        self._downloaded_bytes.pop(task_id, None)
+        # 如果下载成功且有实际文件，更新实际大小和表格显示
+        if success and file_path and os.path.exists(file_path):
+            actual_size = os.path.getsize(file_path)
+            if actual_size > 0:
+                self._task_file_sizes[task_id] = actual_size
+                self._update_size_in_table(task_id, actual_size)
+        # 检查是否所有任务都已完成
+        if not self._download_start_times:
+            if hasattr(self, '_speed_timer') and self._speed_timer.isActive():
+                self._speed_timer.stop()
+            self._speed_label.setText("下载速度: --")
+            self._speed_label.setStyleSheet("font-size: 13px; color: #999;")
+        # 刷新磁盘信息
+        self._update_disk_info()
 
     def _update_stats(self):
         tasks     = self._dm.get_all_tasks()
         total     = len(tasks)
         completed = sum(1 for t in tasks if t.status == DownloadStatus.COMPLETED)
         failed    = sum(1 for t in tasks if t.status == DownloadStatus.FAILED)
-        self._stats_label.setText(f"任务: {total} | 完成: {completed} | 失败: {failed}")
+        # 计算已完成任务的实际文件大小
+        completed_size = 0
+        for t in tasks:
+            if t.status == DownloadStatus.COMPLETED and t.file_path and os.path.exists(t.file_path):
+                completed_size += os.path.getsize(t.file_path)
+        size_str = f" ({self._format_bytes(completed_size)})" if completed_size > 0 else ""
+        self._stats_label.setText(f"任务: {total} | 完成: {completed}{size_str} | 失败: {failed}")
+
+    def _update_status_bar_from_tasks(self):
+        """根据所有任务状态更新底部状态栏"""
+        tasks = self._dm.get_all_tasks()
+        if not tasks:
+            self.statusBar().showMessage("就绪")
+            return
+
+        downloading = sum(1 for t in tasks if t.status == DownloadStatus.DOWNLOADING)
+        pending = sum(1 for t in tasks if t.status == DownloadStatus.PENDING)
+        completed = sum(1 for t in tasks if t.status == DownloadStatus.COMPLETED)
+        failed = sum(1 for t in tasks if t.status == DownloadStatus.FAILED)
+
+        if downloading > 0:
+            self.statusBar().showMessage(f"正在下载 {downloading} 个任务...")
+        elif pending > 0:
+            self.statusBar().showMessage(f"等待下载 {pending} 个任务")
+        elif completed > 0 and failed == 0:
+            self.statusBar().showMessage(f"全部完成 ({completed} 个任务)")
+        elif failed > 0:
+            self.statusBar().showMessage(f"下载完成: {completed} 成功, {failed} 失败")
+        else:
+            self.statusBar().showMessage("就绪")
 
     # ------------------------------------------------------------------ #
     #  日志
@@ -1928,6 +3329,7 @@ class MainWindow(QMainWindow):
                     self.devices      = cfg.get('devices', [])
                     self.download_dir = cfg.get('download_dir', self.download_dir)
                     self._time_presets = cfg.get('time_presets', {})
+                    self._download_mode = cfg.get('download_mode', 'isapi')
             except Exception as e:
                 print(f"加载配置失败: {e}")
 
@@ -1941,6 +3343,7 @@ class MainWindow(QMainWindow):
                     'devices':      self.devices,
                     'download_dir': self.download_dir,
                     'time_presets': self._time_presets,
+                    'download_mode': self._download_mode,
                 }, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"保存配置失败: {e}")
@@ -2146,5 +3549,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._dm.stop()
+        # 停止ISAPI下载任务
+        if hasattr(self, '_isapi_stop_events'):
+            for task_id, stop_event in self._isapi_stop_events.items():
+                stop_event.set()
+            self._isapi_stop_events.clear()
         self._save_config()
         event.accept()
+

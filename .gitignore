@@ -68,10 +68,13 @@ desktop.ini
 # WorkBuddy
 .workbuddy/
 
-# Test files
+# Test/analysis files
 test_*.py
 test_*.bat
 diagnose_*.py
+analyze_*.py
+debug_*.py
+monitor_*.py
 
 # Binary files
 bin/

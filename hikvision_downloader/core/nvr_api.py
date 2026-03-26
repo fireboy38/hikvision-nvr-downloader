@@ -112,6 +112,13 @@ class HikvisionISAPI:
                 def _find(tag):
                     return ch_elem.find(f'{ns_prefix}{tag}') if ns_prefix else ch_elem.find(tag)
 
+                def _find_in_parent(elem, tag):
+                    """在父元素中查找，支持嵌套"""
+                    if ns_prefix:
+                        return elem.find(f'{ns_prefix}{tag}')
+                    else:
+                        return elem.find(tag)
+
                 id_el     = _find('id')
                 name_el   = _find('name')
                 status_el = _find('connectionStatus')
@@ -131,7 +138,58 @@ class HikvisionISAPI:
                         status = 'unknown'
                         online = True   # 占位，会被后续覆盖
 
-                    channels[no] = {'name': name, 'online': online, 'status': status}
+                    # 初始化通道信息
+                    ch_info = {'name': name, 'online': online, 'status': status}
+                    
+                    # 获取源输入端口信息（IP地址等）
+                    source_input = _find('sourceInputPortDescriptor')
+                    if source_input is not None:
+                        # IP地址
+                        ip_el = source_input.find(f'{ns_prefix}ipAddress') if ns_prefix else source_input.find('ipAddress')
+                        if ip_el is not None and ip_el.text:
+                            ch_info['ip'] = ip_el.text
+                        
+                        # 管理端口
+                        mgmt_port_el = source_input.find(f'{ns_prefix}managePortNo') if ns_prefix else source_input.find('managePortNo')
+                        if mgmt_port_el is not None and mgmt_port_el.text:
+                            ch_info['mgmt_port'] = mgmt_port_el.text
+                        
+                        # 协议
+                        protocol_el = source_input.find(f'{ns_prefix}srcInputPortProtocol') if ns_prefix else source_input.find('srcInputPortProtocol')
+                        if protocol_el is not None and protocol_el.text:
+                            ch_info['protocol'] = protocol_el.text
+                        
+                        # 用户名
+                        user_el = source_input.find(f'{ns_prefix}userName') if ns_prefix else source_input.find('userName')
+                        if user_el is not None and user_el.text:
+                            ch_info['username'] = user_el.text
+                    
+                    # 获取OSD信息
+                    osd = _find('OSD')
+                    if osd is not None:
+                        osd_info = {}
+                        
+                        # OSD名称
+                        osd_name_el = osd.find(f'{ns_prefix}name') if ns_prefix else osd.find('name')
+                        if osd_name_el is not None and osd_name_el.text:
+                            osd_info['name'] = osd_name_el.text
+                        
+                        # OSD是否启用
+                        osd_enabled_el = osd.find(f'{ns_prefix}enabled') if ns_prefix else osd.find('enabled')
+                        if osd_enabled_el is not None and osd_enabled_el.text:
+                            osd_info['enabled'] = osd_enabled_el.text == 'true'
+                        
+                        # OSD位置
+                        osd_pos_el = osd.find(f'{ns_prefix}position') if ns_prefix else osd.find('position')
+                        if osd_pos_el is not None:
+                            pos_type_el = osd_pos_el.find(f'{ns_prefix}positionType') if ns_prefix else osd_pos_el.find('positionType')
+                            if pos_type_el is not None and pos_type_el.text:
+                                osd_info['position_type'] = pos_type_el.text
+                        
+                        if osd_info:
+                            ch_info['osd'] = osd_info
+                    
+                    channels[no] = ch_info
                 except Exception:
                     pass
 
@@ -225,6 +283,74 @@ class HikvisionISAPI:
             offline_count = len(channels) - online_count
             print(f"[ISAPI] 通道在线状态: {online_count}在线, {offline_count}离线/未知")
         return channels
+
+    def set_channel_osd(self, channel_no: int, osd_name: str, enabled: bool = True) -> Tuple[bool, str]:
+        """
+        设置通道OSD名称（实际上是修改通道名称）
+        
+        注意：对于此NVR，OSD显示的就是通道名称（InputProxy接口中的<name>标签），
+        没有独立的OSD配置。因此此方法修改的是通道名称。
+        
+        Args:
+            channel_no: 通道号
+            osd_name: OSD名称（通道名称）
+            enabled: 是否启用（此参数在此NVR上无效，保留用于兼容性）
+            
+        Returns:
+            (success, message)
+        """
+        try:
+            # 首先获取当前通道配置
+            url = f"{self.base_url}/ISAPI/ContentMgmt/InputProxy/channels/{channel_no}"
+            print(f"[OSD] GET {url}")
+            resp = self.session.get(url, timeout=10)
+            print(f"[OSD] GET响应: HTTP {resp.status_code}")
+            
+            if resp.status_code != 200:
+                return False, f"获取通道配置失败: HTTP {resp.status_code}"
+            
+            # 获取原始XML文本
+            original_xml = resp.text
+            print(f"[OSD] 原始XML长度: {len(original_xml)}")
+            
+            # 使用正则表达式替换 <name> 标签内容
+            # 匹配 <name>xxx</name> 或 <name xmlns="...">xxx</name>
+            import re
+            
+            # 先检查是否存在 name 标签
+            name_pattern = r'(<name[^>]*>)[^<]*(</name>)'
+            match = re.search(name_pattern, original_xml)
+            
+            if match:
+                # 替换现有的 name 标签内容
+                new_xml = re.sub(name_pattern, rf'\g<1>{osd_name}\g<2>', original_xml)
+                print(f"[OSD] 替换名称: '{match.group(0)}' -> '<name...>{osd_name}</name>'")
+            else:
+                # 如果没有 name 标签，在根元素内添加
+                # 找到第一个 > 后面插入 name 标签
+                insert_pattern = r'(<InputProxyChannel[^>]*>)'
+                new_xml = re.sub(insert_pattern, rf'\g<1>\n<name>{osd_name}</name>', original_xml, count=1)
+                print(f"[OSD] 添加新name标签: <name>{osd_name}</name>")
+            
+            print(f"[OSD] PUT请求XML前500字符:\n{new_xml[:500]}...")
+            
+            # 发送PUT请求更新配置
+            headers = {'Content-Type': 'application/xml'}
+            resp = self.session.put(url, data=new_xml.encode('utf-8'), headers=headers, timeout=10)
+            print(f"[OSD] PUT响应: HTTP {resp.status_code}")
+            
+            if resp.status_code == 200:
+                return True, f"通道{channel_no} 名称/OSD更新成功"
+            else:
+                error_detail = resp.text[:300] if resp.text else "无响应内容"
+                print(f"[OSD] PUT失败详情: {error_detail}")
+                return False, f"更新通道名称失败: HTTP {resp.status_code} - {error_detail}"
+                
+        except Exception as e:
+            import traceback
+            print(f"[OSD] 异常: {e}")
+            print(f"[OSD] 异常详情: {traceback.format_exc()}")
+            return False, f"设置OSD异常: {str(e)}"
 
     def _get_names_from_streaming(self) -> Dict[int, str]:
         """从 /ISAPI/Streaming/channels 获取名称"""
@@ -765,6 +891,622 @@ class HikvisionISAPI:
         except Exception as e:
             print(f"[ISAPI] 获取网络接口异常: {e}")
         return interfaces
+
+    # ------------------------------------------------------------------ #
+    #  通道流信息（分辨率、码率、编码等）
+    # ------------------------------------------------------------------ #
+
+    def get_channel_stream_info(self) -> Dict[int, Dict]:
+        """
+        获取通道流信息（分辨率、码率、编码格式等）
+        返回 {channel_no: {'main_stream': {...}, 'sub_stream': {...}}}
+        
+        主码流ID格式: 101, 201, 301... (通道号*100 + 1)
+        子码流ID格式: 102, 202, 302... (通道号*100 + 2)
+        """
+        stream_info: Dict[int, Dict] = {}
+        try:
+            url = f"{self.base_url}/ISAPI/Streaming/channels"
+            resp = self.session.get(url, timeout=15)
+            if resp.status_code != 200:
+                print(f"[ISAPI] 获取流信息失败: HTTP {resp.status_code}")
+                return stream_info
+
+            root = ET.fromstring(resp.text)
+            
+            # 尝试不同的命名空间
+            ns_options = [
+                'http://www.isapi.org/ver20/XMLSchema',
+                'http://www.hikvision.com/ver20/XMLSchema',
+            ]
+            ns = None
+            for ns_opt in ns_options:
+                if root.find(f'.//{{{ns_opt}}}StreamingChannel') is not None:
+                    ns = ns_opt
+                    break
+            
+            if ns is None:
+                # 尝试无命名空间
+                channels = root.findall('.//StreamingChannel')
+            else:
+                channels = root.findall(f'.//{{{ns}}}StreamingChannel')
+            
+            for ch in channels:
+                # 获取ID
+                if ns:
+                    id_el = ch.find(f'{{{ns}}}id')
+                else:
+                    id_el = ch.find('id')
+                
+                if id_el is None or not id_el.text:
+                    continue
+                
+                try:
+                    stream_id = int(id_el.text)
+                    # ID格式: 101=通道1主码流, 102=通道1子码流, 104=通道1第三码流
+                    ch_no = stream_id // 100
+                    stream_suffix = stream_id % 100
+                    if stream_suffix == 1:
+                        stream_type = 'main_stream'
+                    elif stream_suffix == 2:
+                        stream_type = 'sub_stream'
+                    else:
+                        # 其他码流（如第三码流04）跳过
+                        continue
+                    
+                    if ch_no not in stream_info:
+                        stream_info[ch_no] = {}
+                    
+                    info = {
+                        'stream_id': stream_id,
+                        'enabled': False,
+                        'resolution': '',
+                        'codec': '',
+                        'codec_profile': '',  # 编码配置文件 (Main/High/Baseline等)
+                        'smart_codec': False,  # 是否启用Smart Codec (Smart H.265/H.264)
+                        'smart_codec_type': '',  # Smart Codec类型
+                        'bitrate_kbps': 0,
+                        'bitrate_mode': '',  # 码率控制类型: CBR(定码率)/VBR(变码率)
+                        'fps': 0,
+                        'audio_enabled': False,
+                        'audio_codec': '',
+                    }
+                    
+                    # 获取enabled状态
+                    if ns:
+                        enabled_el = ch.find(f'{{{ns}}}enabled')
+                    else:
+                        enabled_el = ch.find('enabled')
+                    if enabled_el is not None:
+                        info['enabled'] = enabled_el.text == 'true'
+                    
+                    # 获取Video信息
+                    if ns:
+                        video = ch.find(f'{{{ns}}}Video')
+                    else:
+                        video = ch.find('Video')
+                    
+                    if video is not None:
+                        # 分辨率
+                        if ns:
+                            width = video.find(f'{{{ns}}}videoResolutionWidth')
+                            height = video.find(f'{{{ns}}}videoResolutionHeight')
+                        else:
+                            width = video.find('videoResolutionWidth')
+                            height = video.find('videoResolutionHeight')
+                        
+                        if width is not None and height is not None:
+                            info['resolution'] = f"{width.text}x{height.text}"
+                        
+                        # 编码格式
+                        if ns:
+                            codec = video.find(f'{{{ns}}}videoCodecType')
+                        else:
+                            codec = video.find('videoCodecType')
+                        if codec is not None:
+                            info['codec'] = codec.text
+                        
+                        # 编码配置文件 (profile)
+                        if ns:
+                            profile = video.find(f'{{{ns}}}videoCodecProfile')
+                        else:
+                            profile = video.find('videoCodecProfile')
+                        if profile is not None:
+                            info['codec_profile'] = profile.text
+                        
+                        # 码率控制类型 (CBR/VBR)
+                        if ns:
+                            bitrate_mode = video.find(f'{{{ns}}}videoQualityControlType')
+                        else:
+                            bitrate_mode = video.find('videoQualityControlType')
+                        if bitrate_mode is not None:
+                            info['bitrate_mode'] = bitrate_mode.text
+                        
+                        # Smart Codec (Smart H.265/H.264)
+                        if ns:
+                            smart_codec = video.find(f'{{{ns}}}smartCodec')
+                        else:
+                            smart_codec = video.find('smartCodec')
+                        if smart_codec is not None:
+                            # smartCodec可能是一个复杂结构或简单布尔值
+                            if smart_codec.text:
+                                info['smart_codec'] = smart_codec.text.lower() == 'true'
+                            else:
+                                # 查找enabled子元素
+                                if ns:
+                                    smart_enabled = smart_codec.find(f'{{{ns}}}enabled')
+                                else:
+                                    smart_enabled = smart_codec.find('enabled')
+                                if smart_enabled is not None:
+                                    info['smart_codec'] = smart_enabled.text.lower() == 'true'
+                            
+                            # Smart Codec类型
+                            if ns:
+                                smart_type = smart_codec.find(f'{{{ns}}}smartCodecType')
+                            else:
+                                smart_type = smart_codec.find('smartCodecType')
+                            if smart_type is not None:
+                                info['smart_codec_type'] = smart_type.text
+                        
+                        # 码率 (kbps) — 支持 CBR 和 VBR 模式
+                        # CBR: constantBitRate; VBR: upperBitRate / peakBitRate
+                        bitrate_kbps = 0
+                        for bitrate_tag in ['constantBitRate', 'upperBitRate', 'peakBitRate']:
+                            if ns:
+                                bitrate = video.find(f'{{{ns}}}{bitrate_tag}')
+                            else:
+                                bitrate = video.find(bitrate_tag)
+                            if bitrate is not None and bitrate.text:
+                                try:
+                                    bitrate_kbps = int(bitrate.text)
+                                    if bitrate_kbps > 0:
+                                        break
+                                except:
+                                    pass
+                        if bitrate_kbps > 0:
+                            info['bitrate_kbps'] = bitrate_kbps
+                        else:
+                            print(f"[ISAPI] 通道{ch_no} {stream_type} 码率为0，跳过 (CBR/VBR节点均无效)")
+                        
+                        # 帧率 (maxFrameRate通常是100的倍数，如2500=25fps)
+                        if ns:
+                            fps = video.find(f'{{{ns}}}maxFrameRate')
+                        else:
+                            fps = video.find('maxFrameRate')
+                        if fps is not None and fps.text:
+                            try:
+                                fps_val = int(fps.text)
+                                # 只处理大于0的帧率值，0表示未设置
+                                if fps_val > 0:
+                                    info['fps'] = fps_val // 100 if fps_val >= 100 else fps_val
+                            except:
+                                pass
+                    
+                    # 获取Audio信息
+                    if ns:
+                        audio = ch.find(f'{{{ns}}}Audio')
+                    else:
+                        audio = ch.find('Audio')
+                    
+                    if audio is not None:
+                        if ns:
+                            audio_enabled = audio.find(f'{{{ns}}}enabled')
+                            audio_codec = audio.find(f'{{{ns}}}audioCompressionType')
+                        else:
+                            audio_enabled = audio.find('enabled')
+                            audio_codec = audio.find('audioCompressionType')
+                        
+                        if audio_enabled is not None:
+                            info['audio_enabled'] = audio_enabled.text == 'true'
+                        if audio_codec is not None:
+                            info['audio_codec'] = audio_codec.text
+                    
+                    stream_info[ch_no][stream_type] = info
+                    
+                except Exception as e:
+                    print(f"[ISAPI] 解析通道流信息异常: {e}")
+                    continue
+            
+            print(f"[ISAPI] 获取到 {len(stream_info)} 个通道的流信息")
+            
+        except Exception as e:
+            print(f"[ISAPI] 获取通道流信息失败: {e}")
+        
+        return stream_info
+
+    # ------------------------------------------------------------------ #
+    #  ISAPI HTTP 录像下载（时间段截取）
+    # ------------------------------------------------------------------ #
+
+    def download_record_by_time(
+        self,
+        channel: int,
+        start_time: 'datetime',
+        end_time: 'datetime',
+        save_path: str,
+        stream_type: int = 1,
+        rtsp_port: int = 554,
+        progress_callback: Optional[callable] = None,
+        log_callback: Optional[callable] = None,
+        stop_event: 'threading.Event' = None,
+        size_callback: Optional[callable] = None,
+    ) -> Tuple[bool, str]:
+        """
+        通过 ISAPI HTTP 接口下载指定时间段的录像文件。
+
+        原理：向 NVR 发送一个 POST /ISAPI/ContentMgmt/download 请求，
+        请求体中包含一个 RTSP 回放 URI（playbackURI），NVR 在服务端
+        将 RTSP 流转封装为 PS 流通过 HTTP 响应体流式返回，客户端边
+        接收边写入文件。
+
+        优势：
+        - 比 RTSP 更稳定（HTTP 长连接，不受 NAT/firewall 影响）
+        - 速度通常优于 RTSP（NVR 服务端直接处理，无需实时协商）
+        - 不依赖 Java SDK，纯 Python 实现
+
+        回退：如果 ISAPI download 接口不可用，自动回退到 RTSP FFmpeg 方式。
+
+        Args:
+            channel:       通道号（1-128）
+            start_time:    开始时间
+            end_time:      结束时间
+            save_path:     保存文件路径（如 /path/to/ch1_20260326.mp4）
+            stream_type:   码流类型 1=主码流, 2=子码流（默认主码流）
+            rtsp_port:     RTSP端口（默认554）
+            progress_callback: 进度回调 (progress_percent: int)
+            log_callback:  日志回调 (msg: str)
+            stop_event:    停止事件（可选，用于中断下载）
+            size_callback: 文件大小回调 (size_bytes: int)，连接成功后立即回调
+
+        Returns:
+            (success, message)
+        """
+        import urllib.parse
+        import time
+        import threading as _threading
+
+        def _log(msg: str):
+            if log_callback:
+                try:
+                    log_callback(msg)
+                except Exception:
+                    pass
+            print(f"[ISAPI下载] {msg}")
+
+        # 构建内部 RTSP 回放 URI
+        stream_code = f"0{stream_type}"
+        track_id = f"{channel}{stream_code}"
+        start_str = start_time.strftime("%Y%m%dT%H%M%S")
+        end_str = end_time.strftime("%Y%m%dT%H%M%S")
+
+        safe_user = urllib.parse.quote(self.username, safe='')
+        safe_pass = urllib.parse.quote(self.password, safe='')
+
+        rtsp_uri = (
+            f"rtsp://{safe_user}:{safe_pass}@{self.host}:{rtsp_port}"
+            f"/Streaming/tracks/{track_id}"
+            f"?starttime={start_str}Z&endtime={end_str}Z"
+        )
+
+        duration_sec = (end_time - start_time).total_seconds()
+        _log(f"通道{channel} | {start_time.strftime('%H:%M:%S')}~{end_time.strftime('%H:%M:%S')} | 时长{duration_sec:.0f}s")
+
+        # 构建 XML 请求体
+        xml_body = (
+            '<?xml version="1.0" encoding="UTF-8"?>\r\n'
+            '<downloadRequest version="1.0">\r\n'
+            f'  <playbackURI><![CDATA[{rtsp_uri}]]></playbackURI>\r\n'
+            '</downloadRequest>\r\n'
+        )
+
+        # 多种接口路径（兼容不同固件版本）
+        urls_to_try = [
+            f"{self.base_url}/ISAPI/ContentMgmt/download",
+            f"{self.base_url}/ISAPI/Streaming/channels/download",
+            f"{self.base_url}/ISAPI/ContentMgrmt/download",
+        ]
+
+        headers = {
+            'Content-Type': 'application/xml',
+            'Accept': '*/*',
+        }
+
+        # 确保保存目录存在
+        save_dir = os.path.dirname(save_path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+
+        last_error = ""
+
+        for attempt_idx, url in enumerate(urls_to_try):
+            if stop_event and stop_event.is_set():
+                return False, "用户取消下载"
+
+            _log(f"尝试接口: POST {url.split(self.host)[-1]}")
+
+            try:
+                resp = self.session.post(
+                    url,
+                    data=xml_body.encode('utf-8'),
+                    headers=headers,
+                    timeout=30,           # 连接超时
+                    stream=True,           # 流式接收
+                )
+
+                if resp.status_code == 401:
+                    last_error = "认证失败（HTTP 401），请检查用户名密码"
+                    _log(f"❌ {last_error}")
+                    continue
+
+                if resp.status_code == 404:
+                    last_error = f"接口不存在（HTTP 404）: {url}"
+                    _log(f"⚠️ {last_error}")
+                    continue
+
+                if resp.status_code != 200:
+                    last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    _log(f"❌ {last_error}")
+                    continue
+
+                # 成功连接，开始流式接收
+                content_length = resp.headers.get('Content-Length')
+                if content_length:
+                    total_bytes = int(content_length)
+                    _log(f"✅ 连接成功，文件大小: {total_bytes / 1024 / 1024:.2f}MB")
+                    # 立即回调通知文件大小（用于表格预显示）
+                    if size_callback:
+                        try:
+                            size_callback(total_bytes)
+                        except Exception:
+                            pass
+                else:
+                    total_bytes = None
+                    _log(f"✅ 连接成功，流式接收（未知大小）")
+
+                # 写入文件
+                downloaded_bytes = 0
+                chunk_size = 1024 * 256  # 256KB
+                t_start = time.monotonic()
+
+                with open(save_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=chunk_size):
+                        if stop_event and stop_event.is_set():
+                            # 中断：删除不完整文件
+                            f.close()
+                            try:
+                                os.remove(save_path)
+                            except OSError:
+                                pass
+                            return False, "用户取消下载"
+
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_bytes += len(chunk)
+
+                            # 计算进度
+                            if total_bytes and total_bytes > 0:
+                                pct = min(int(downloaded_bytes * 100 / total_bytes), 99)
+                            elif duration_sec > 0:
+                                # 按 Content-Length 未知时，用时间估算
+                                elapsed = time.monotonic() - t_start
+                                # 码率估算：已下载/已用时间
+                                if elapsed > 0:
+                                    avg_speed = downloaded_bytes / elapsed
+                                    estimated_total = avg_speed * duration_sec
+                                    if estimated_total > 0:
+                                        pct = min(int(downloaded_bytes * 100 / estimated_total), 99)
+                                    else:
+                                        pct = min(int(elapsed / duration_sec * 100), 99)
+                                else:
+                                    pct = 0
+                            else:
+                                pct = 0
+
+                            if progress_callback:
+                                try:
+                                    progress_callback(pct)
+                                except Exception:
+                                    pass
+
+                elapsed_sec = time.monotonic() - t_start
+                file_size = os.path.getsize(save_path) if os.path.exists(save_path) else 0
+
+                if file_size == 0:
+                    last_error = "下载的文件为空（0字节），可能录像不存在或时间段无效"
+                    _log(f"❌ {last_error}")
+                    # 删除空文件
+                    try:
+                        os.remove(save_path)
+                    except OSError:
+                        pass
+                    continue
+
+                if progress_callback:
+                    try:
+                        progress_callback(100)
+                    except Exception:
+                        pass
+
+                speed_mb = downloaded_bytes / elapsed_sec / 1024 / 1024 if elapsed_sec > 0 else 0
+                _log(f"✅ 下载完成: {file_size / 1024 / 1024:.2f}MB, 耗时{elapsed_sec:.1f}s, 速度{speed_mb:.2f}MB/s")
+                return True, f"ISAPI下载完成, {file_size / 1024 / 1024:.2f}MB, 耗时{elapsed_sec:.1f}s"
+
+            except requests.exceptions.Timeout:
+                last_error = f"连接超时: {url}"
+                _log(f"❌ {last_error}")
+                continue
+            except requests.exceptions.ConnectionError:
+                last_error = f"连接被拒绝: {url}"
+                _log(f"❌ {last_error}")
+                continue
+            except Exception as e:
+                last_error = f"下载异常: {str(e)}"
+                _log(f"❌ {last_error}")
+                import traceback
+                _log(f"   详情: {traceback.format_exc()[-300:]}")
+                continue
+
+        # 所有 ISAPI 接口都失败，自动回退到 RTSP FFmpeg
+        _log(f"⚠️ ISAPI接口全部失败，自动回退到RTSP FFmpeg方式...")
+        return self._download_record_by_rtsp_fallback(
+            channel=channel,
+            start_time=start_time,
+            end_time=end_time,
+            save_path=save_path,
+            stream_type=stream_type,
+            rtsp_port=rtsp_port,
+            progress_callback=progress_callback,
+            log_callback=log_callback,
+            stop_event=stop_event,
+        )
+
+    def _download_record_by_rtsp_fallback(
+        self,
+        channel: int,
+        start_time: 'datetime',
+        end_time: 'datetime',
+        save_path: str,
+        stream_type: int = 1,
+        rtsp_port: int = 554,
+        progress_callback: Optional[callable] = None,
+        log_callback: Optional[callable] = None,
+        stop_event: 'threading.Event' = None,
+    ) -> Tuple[bool, str]:
+        """
+        RTSP FFmpeg 回退下载方式。
+
+        当 ISAPI HTTP 接口不可用时，使用 FFmpeg 通过 RTSP 协议下载录像。
+        """
+        import subprocess
+        import signal
+        import time
+        import threading as _threading
+
+        def _log(msg: str):
+            if log_callback:
+                try:
+                    log_callback(msg)
+                except Exception:
+                    pass
+            print(f"[RTSP回退] {msg}")
+
+        stream_code = "01" if stream_type == 1 else "02"
+        track_id = f"{channel}{stream_code}"
+        start_str = start_time.strftime("%Y%m%dT%H%M%S")
+        end_str = end_time.strftime("%Y%m%dT%H%M%S")
+
+        import urllib.parse
+        safe_user = urllib.parse.quote(self.username, safe='')
+        safe_pass = urllib.parse.quote(self.password, safe='')
+
+        rtsp_url = (
+            f"rtsp://{safe_user}:{safe_pass}@{self.host}:{rtsp_port}"
+            f"/Streaming/tracks/{track_id}"
+            f"?starttime={start_str}Z&endtime={end_str}Z"
+        )
+
+        duration_sec = (end_time - start_time).total_seconds()
+        _log(f"RTSP URL: rtsp://{self.username}:****@{self.host}:{rtsp_port}/Streaming/tracks/{track_id}")
+
+        # FFmpeg路径
+        ffmpeg_path = r"C:\tools\ffmpeg\bin\ffmpeg.exe"
+        if not os.path.exists(ffmpeg_path):
+            # 尝试 PATH
+            ffmpeg_path = "ffmpeg"
+
+        # 两套命令：先尝试带音频，失败则丢弃音频
+        cmd_with_audio = [
+            ffmpeg_path, "-y",
+            "-rtsp_transport", "tcp",
+            "-i", rtsp_url,
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "64k",
+            "-f", "mp4",
+            save_path,
+        ]
+        cmd_no_audio = [
+            ffmpeg_path, "-y",
+            "-rtsp_transport", "tcp",
+            "-i", rtsp_url,
+            "-c:v", "copy",
+            "-an",
+            "-f", "mp4",
+            save_path,
+        ]
+
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
+
+        for attempt, cmd in enumerate([cmd_with_audio, cmd_no_audio], start=1):
+            if stop_event and stop_event.is_set():
+                return False, "用户取消下载"
+
+            if attempt == 2:
+                _log("音频转AAC失败，改为丢弃音频重试...")
+
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    startupinfo=startupinfo,
+                    creationflags=creation_flags,
+                )
+
+                t_start = time.monotonic()
+                last_progress = 0
+
+                while proc.poll() is None:
+                    if stop_event and stop_event.is_set():
+                        # 停止FFmpeg
+                        try:
+                            if os.name == 'nt':
+                                proc.send_signal(signal.CTRL_BREAK_EVENT)
+                            else:
+                                proc.terminate()
+                            proc.wait(timeout=3)
+                        except Exception:
+                            proc.kill()
+                        return False, "用户取消下载"
+
+                    elapsed = time.monotonic() - t_start
+                    if duration_sec > 0:
+                        pct = min(int((elapsed / duration_sec) * 100), 99)
+                        if pct != last_progress and progress_callback:
+                            progress_callback(pct)
+                            last_progress = pct
+
+                    _threading.Event().wait(0.5)
+
+                stdout, stderr = proc.communicate(timeout=5)
+                return_code = proc.returncode
+
+                if return_code == 0 and os.path.exists(save_path):
+                    file_size = os.path.getsize(save_path) / (1024 * 1024)
+                    actual_duration = time.monotonic() - t_start
+                    if progress_callback:
+                        progress_callback(100)
+                    audio_note = "（含音频）" if attempt == 1 else "（无音频）"
+                    return True, f"RTSP下载完成{audio_note}，{file_size:.2f}MB，耗时{actual_duration:.0f}s"
+
+                error_msg = (stderr.decode('utf-8', errors='ignore') if stderr else "")
+                if "404" in error_msg or "Not Found" in error_msg:
+                    return False, "录像不存在或时间范围无效"
+                elif "401" in error_msg or "Unauthorized" in error_msg:
+                    return False, "认证失败，请检查用户名密码"
+                elif attempt == 1 and ("codec not currently supported" in error_msg
+                                       or "Could not find tag for codec" in error_msg):
+                    continue
+                else:
+                    return False, f"FFmpeg错误: {error_msg[-500:]}"
+
+            except Exception as e:
+                return False, f"RTSP下载异常: {str(e)}"
+
+        return False, "所有下载方式均失败"
 
     # ------------------------------------------------------------------ #
     #  工具函数
