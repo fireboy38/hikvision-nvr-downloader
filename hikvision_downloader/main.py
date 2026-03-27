@@ -1,4 +1,4 @@
-# 海康NVR批量录像下载工具
+# 四川新数录像批量下载器
 # 主程序入口
 
 import sys
@@ -16,13 +16,17 @@ from utils.logger import logger
 
 def main():
     """主函数"""
-    # 启用高DPI缩放
+    # 高DPI缩放设置（必须在创建QApplication之前）
+    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+    os.environ["QT_SCALE_FACTOR"] = "1"
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+    
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     
     # 创建应用
     app = QApplication(sys.argv)
-    app.setApplicationName("海康NVR批量录像下载工具")
+    app.setApplicationName("四川新数录像批量下载器")
     app.setApplicationVersion("1.0.0")
     
     # 设置样式
