@@ -1046,13 +1046,13 @@ class MainWindow(QMainWindow):
         hbox.addWidget(self._make_right_panel(), 3)
         main_layout.addLayout(hbox)
 
-        # 版权信息（在底部，状态栏上方）
-        copyright_label = QLabel("版权所有：四川新数信息技术有限公司   www.scxs.vip")
-        copyright_label.setStyleSheet("font-size: 11px; color: #888; padding: 5px;")
-        copyright_label.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(copyright_label)
-
+        # 状态栏设置
         self.statusBar().showMessage("就绪")
+        
+        # 在状态栏右下角添加版权信息
+        copyright_label = QLabel("版权所有：四川新数信息技术有限公司   www.scxs.vip")
+        copyright_label.setStyleSheet("font-size: 11px; color: #888; padding: 0 10px;")
+        self.statusBar().addPermanentWidget(copyright_label)
 
     def _make_menu(self):
         mb = self.menuBar()
@@ -1175,6 +1175,8 @@ class MainWindow(QMainWindow):
         self._device_list.setSelectionMode(QAbstractItemView.ExtendedSelection)  # 支持多选
         self._device_list.itemDoubleClicked.connect(self._on_device_double_clicked)  # 双击连接设备
         self._device_list.currentRowChanged.connect(self._on_device_row_changed)
+        # 设置高度为显示7行（每行约25px，总计175px）
+        self._device_list.setFixedHeight(175)
         dl.addWidget(self._device_list)
 
         hb = QHBoxLayout()
