@@ -34,7 +34,7 @@ jobs:
     - name: Build EXE with PyInstaller
       run: |
         pyinstaller --noconfirm --onefile --windowed `
-          --name "HikvisionNVRDownloader" `
+          --name "四川新数录像批量下载器" `
           --paths "hikvision_downloader" `
           --hidden-import PyQt5 `
           --hidden-import PyQt5.sip `
@@ -60,6 +60,11 @@ jobs:
           --hidden-import core.java_downloader `
           --hidden-import core.nvr_api `
           --hidden-import core.hcnetsdk `
+          --hidden-import core.channel_manager `
+          --hidden-import core.device_info `
+          --hidden-import core.hikload_downloader `
+          --hidden-import core.isapi_downloader `
+          --hidden-import core.osd_manager `
           --hidden-import utils `
           --hidden-import utils.logger `
           hikvision_downloader/main.py
@@ -67,8 +72,8 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: HikvisionNVRDownloader-Windows
-        path: dist/HikvisionNVRDownloader.exe
+        name: 四川新数录像批量下载器-Windows
+        path: dist/四川新数录像批量下载器.exe
         
     - name: Get current date
       id: date
@@ -86,12 +91,12 @@ jobs:
           提交: ${{ github.sha }}
           
           ## 使用方法
-          1. 下载 `HikvisionNVRDownloader.exe`
+          1. 下载 `四川新数录像批量下载器.exe`
           2. 双击运行即可
           
           ## 注意
           这是自动构建版本，可能包含最新但未经充分测试的功能。
-        files: dist/HikvisionNVRDownloader.exe
+        files: dist/四川新数录像批量下载器.exe
         draft: false
         prerelease: true
       env:
@@ -101,7 +106,7 @@ jobs:
       if: startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v1
       with:
-        files: dist/HikvisionNVRDownloader.exe
+        files: dist/四川新数录像批量下载器.exe
         draft: false
         prerelease: false
       env:
