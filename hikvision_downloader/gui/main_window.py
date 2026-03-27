@@ -1220,10 +1220,10 @@ class MainWindow(QMainWindow):
         cl.addWidget(self._channel_count_label)
 
         cg.setLayout(cl)
-        vbox.addWidget(cg, 5)  # 通道选择窗口垂直比例更大（增加通道显示区域）
+        vbox.addWidget(cg, 7)  # 通道选择窗口垂直比例更大（显示更多通道）
 
         # 在时间选择框前添加垂直间距
-        vbox.addSpacing(15)
+        vbox.addSpacing(30)
 
         # 时间选择
         tg = QGroupBox("录像时间范围")
