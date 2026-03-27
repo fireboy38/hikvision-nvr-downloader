@@ -50,12 +50,7 @@ public class HikvisionDownloaderCLI {
                                      NET_DVR_DEVICEINFO_V30 lpDeviceInfo);
         boolean   NET_DVR_Logout(NativeLong lUserID);
 
-        // ── 下载接口（V40：支持大文件，无1GB限制）────────────────────────────
-        NativeLong NET_DVR_GetFileByTime_V40(NativeLong lUserID,
-                                             String     sSavedFileName,
-                                             NET_DVR_PLAYCOND pDownloadCond);
-
-        // ── 旧接口（备用，有1GB限制，保留以便回退）──────────────────────────
+        // ── 下载接口（V30，分段下载绕过1GB限制）──────────────────────────
         NativeLong NET_DVR_GetFileByTime(NativeLong lUserID, NativeLong lChannel,
                                          NET_DVR_TIME lpStartTime,
                                          NET_DVR_TIME lpStopTime,
@@ -191,31 +186,6 @@ public class HikvisionDownloaderCLI {
         @Override
         protected List<String> getFieldOrder() {
             return Arrays.asList("dwYear","dwMonth","dwDay","dwHour","dwMinute","dwSecond");
-        }
-    }
-
-    /**
-     * NET_DVR_PLAYCOND — 严格按照 HCNetSDK.h 第28781-28794行
-     * 总大小: 4 + 24 + 24 + 1 + 1 + 32 + 1 + 1 + 1 + 1 + 26 = 116 字节
-     */
-    public static class NET_DVR_PLAYCOND extends Structure {
-        public int   dwChannel;
-        public NET_DVR_TIME struStartTime = new NET_DVR_TIME();
-        public NET_DVR_TIME struStopTime  = new NET_DVR_TIME();
-        public byte  byDrawFrame;           // 0-不抽帧, 1-抽帧
-        public byte  byStreamType;          // 0-主码流, 1-子码流, 2-码流三
-        public byte[] byStreamID = new byte[32]; // STREAM_ID_LEN = 32
-        public byte  byCourseFile;          // 课程文件 0-否, 1-是
-        public byte  byDownload;            // 是否下载 0-否, 1-是
-        public byte  byOptimalStreamType;   // 最优码流 0-否, 1-是
-        public byte  byVODFileType;         // 文件格式 0-PS, 1-3GP
-        public byte[] byRes = new byte[26]; // 保留
-
-        @Override
-        protected List<String> getFieldOrder() {
-            return Arrays.asList("dwChannel","struStartTime","struStopTime",
-                "byDrawFrame","byStreamType","byStreamID","byCourseFile",
-                "byDownload","byOptimalStreamType","byVODFileType","byRes");
         }
     }
 
@@ -489,51 +459,26 @@ public class HikvisionDownloaderCLI {
             endTime.dwSecond = cal.get(java.util.Calendar.SECOND);
             endTime.dwSecond = cal.get(java.util.Calendar.SECOND);
 
-            // ── [4] 下载（智能接口选择：V40 -> V30）──────────────────────────
+            // ── [4] 下载（统一使用V30接口，避免V40的1GB限制问题）──────────
             System.out.println("[3] Download ch" + channel + " [" + startStr + " -> " + endStr + "]");
             System.out.println("    Temp: " + tempPath);
             System.out.println("    Final: " + finalPath);
+            System.out.println("    Mode: V30 (分段下载，绕过1GB限制)");
             System.out.flush();
 
-            NET_DVR_PLAYCOND cond = new NET_DVR_PLAYCOND();
-            cond.dwChannel     = channel;
-            cond.struStartTime = startTime;
-            cond.struStopTime  = endTime;
-            cond.byDrawFrame   = 0;    // 不抽帧
-            cond.byStreamType  = 0;    // 主码流
-            // byStreamID 默认全0（通道号方式）
-            cond.byCourseFile  = 0;
-            cond.byDownload    = 0;    // V40接口不需要此字段
-            cond.byOptimalStreamType = 0;
-            cond.byVODFileType = 0;    // PS格式
-            cond.write();
-
-            // 尝试V40接口（无1GB限制）
-            System.out.println("    [TRY] NET_DVR_GetFileByTime_V40 (no 1GB limit)...");
-            downloadHandle = sdk.NET_DVR_GetFileByTime_V40(userId, tempPath, cond);
+            startTime.write();
+            endTime.write();
+            downloadHandle = sdk.NET_DVR_GetFileByTime(
+                userId, new NativeLong(channel), startTime, endTime, tempPath);
 
             if (downloadHandle.longValue() == -1) {
                 int e = sdk.NET_DVR_GetLastError();
-                System.out.println("    [WARN] V40 failed (error " + e + "), trying V30...");
-                System.out.flush();
-
-                // 回退到V30接口（有1GB限制，但兼容性最好）
-                startTime.write();
-                endTime.write();
-                downloadHandle = sdk.NET_DVR_GetFileByTime(
-                    userId, new NativeLong(channel), startTime, endTime, tempPath);
-
-                if (downloadHandle.longValue() == -1) {
-                    e = sdk.NET_DVR_GetLastError();
-                    System.out.println("    [FAIL] All interfaces failed. Error: " + e + " (" + errDesc(e) + ")");
-                    sdk.NET_DVR_Logout(userId);
-                    sdk.NET_DVR_Cleanup();
-                    System.exit(1);
-                }
-                System.out.println("    [OK] Using V30 handle: " + downloadHandle + " (注意: V30有1GB限制)");
-            } else {
-                System.out.println("    [OK] V40 handle: " + downloadHandle + " (无1GB限制)");
+                System.out.println("    [FAIL] V30 download failed. Error: " + e + " (" + errDesc(e) + ")");
+                sdk.NET_DVR_Logout(userId);
+                sdk.NET_DVR_Cleanup();
+                System.exit(1);
             }
+            System.out.println("    [OK] V30 handle: " + downloadHandle);
 
             // ── [5] 开始播放/下载 ─────────────────────────────────────────
             System.out.println("[4] Start download...");

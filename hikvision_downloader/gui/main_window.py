@@ -32,6 +32,7 @@ from core.downloader import DownloadManager, DownloadTask, DownloadStatus, Batch
 STATUS_COLORS = {
     DownloadStatus.PENDING:     QColor(128, 128, 128),
     DownloadStatus.DOWNLOADING: QColor(0, 120, 215),
+    DownloadStatus.MERGING:     QColor(255, 152, 0),   # 橙色
     DownloadStatus.COMPLETED:   QColor(0, 153, 76),
     DownloadStatus.FAILED:      QColor(232, 17, 35),
     DownloadStatus.CANCELLED:   QColor(160, 160, 160),
@@ -39,6 +40,7 @@ STATUS_COLORS = {
 STATUS_TEXT = {
     DownloadStatus.PENDING:     "等待中",
     DownloadStatus.DOWNLOADING: "下载中",
+    DownloadStatus.MERGING:     "合并中",
     DownloadStatus.COMPLETED:   "已完成",
     DownloadStatus.FAILED:      "失败",
     DownloadStatus.CANCELLED:   "已取消",
@@ -340,6 +342,7 @@ class DownloadSettingsDialog(QDialog):
         self._download_mode_combo = QComboBox()
         self._download_mode_combo.addItem("🌐 ISAPI模式（推荐）", "isapi")
         self._download_mode_combo.addItem("🔌 SDK模式", "sdk")
+        # self._download_mode_combo.addItem("📦 HikLoad模式", "hikload")  # HikLoad模式已禁用
         self._download_mode_combo.setCurrentIndex(0)  # 默认ISAPI
         layout.addRow("下载模式:", self._download_mode_combo)
 
@@ -737,13 +740,6 @@ class ChannelInfoDialog(QDialog):
     
     def _export_osd(self):
         """导出OSD名称到Excel文件（简化格式，便于编辑）"""
-        # 调试：检查table_data中的OSD数据
-        print(f"[DEBUG] _export_osd: table_data 行数: {len(self.table_data)}")
-        if self.table_data:
-            first_row = self.table_data[0]
-            print(f"[DEBUG] 第一行数据: {first_row}")
-            print(f"[DEBUG] osd_name: '{first_row.get('osd_name', 'NOT_FOUND')}'")
-        
         file_path, _ = QFileDialog.getSaveFileName(
             self, "导出OSD文件", 
             f"{self.device_name}_OSD配置.xlsx",
@@ -970,15 +966,15 @@ class MainWindow(QMainWindow):
     _status_signal   = pyqtSignal(str)         # task_id
     _log_signal = pyqtSignal(str)              # log message
     _size_signal = pyqtSignal(str, int)        # task_id, size_bytes（连接成功后立即更新录像大小）
+    _estimate_signal = pyqtSignal(int, int, int)  # total_size, ok_count, fail_count（探测完成更新预计大小）
     _multi_connect_result_signal = pyqtSignal(dict, bool, str, dict, list)  # cfg, ok, msg, dev, channels
     _show_channel_info_signal = pyqtSignal(str, list)  # device_name, table_data
-    _transcode_progress_signal = pyqtSignal(str, int)  # task_id, transcode_progress (转码进度)
 
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("海康NVR批量录像下载工具")
-        self.setMinimumSize(1280, 820)
+        self.setWindowTitle("四川新数录像批量下载器")
+        self.setMinimumSize(1280, 850)
 
         self.devices:      List[Dict] = []
         self._device_channels: Dict[str, List[Dict]] = {}  # {device_key: [channels]}
@@ -1017,10 +1013,14 @@ class MainWindow(QMainWindow):
         # ISAPI模式停止事件集合
         self._isapi_stop_events: Dict[str, 'threading.Event'] = {}
 
+
         # 下载速度跟踪
         self._download_start_times: Dict[str, float] = {}  # {task_id: timestamp}
-        self._downloaded_bytes: Dict[str, int] = {}  # {task_id: bytes} (基于已完成文件大小)
-        self._task_file_sizes: Dict[str, int] = {}   # {task_id: bytes} (录像大小，连接成功后立即更新)
+        self._task_file_sizes: Dict[str, int] = {}   # {task_id: bytes} (录像大小)
+
+        # 网卡速度监控
+        self._last_net_io = None
+        self._last_net_time = 0
 
         self._load_config()
         self._build_ui()
@@ -1036,11 +1036,21 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
-        hbox = QHBoxLayout(central)
-        hbox.setSpacing(6)
+        main_layout = QVBoxLayout(central)
+        main_layout.setSpacing(6)
 
+        # 左右面板
+        hbox = QHBoxLayout()
+        hbox.setSpacing(6)
         hbox.addWidget(self._make_left_panel(), 1)
         hbox.addWidget(self._make_right_panel(), 3)
+        main_layout.addLayout(hbox)
+
+        # 版权信息（在底部，状态栏上方）
+        copyright_label = QLabel("版权所有：四川新数信息技术有限公司   www.scxs.vip")
+        copyright_label.setStyleSheet("font-size: 11px; color: #888; padding: 5px;")
+        copyright_label.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(copyright_label)
 
         self.statusBar().showMessage("就绪")
 
@@ -1086,6 +1096,15 @@ class MainWindow(QMainWindow):
         a.triggered.connect(self._manage_time_presets)
         sm.addAction(a)
 
+        # 关于菜单
+        am = mb.addMenu("关于")
+        a = QAction("📖 使用说明", self)
+        a.triggered.connect(self._show_help)
+        am.addAction(a)
+        a = QAction("ℹ️ 关于软件", self)
+        a.triggered.connect(self._show_about)
+        am.addAction(a)
+
     def _make_toolbar(self):
         tb = QToolBar()
         tb.setMovable(False)
@@ -1093,7 +1112,7 @@ class MainWindow(QMainWindow):
 
         btns = [
             ("➕ 添加设备",  self._add_device),
-            ("🔌 连接设备",  self._connect_device),
+            ("📋 通道详情",  self._query_channel_info),
             ("🔄 刷新通道",  self._refresh_channels),
         ]
         for label, slot in btns:
@@ -1124,6 +1143,7 @@ class MainWindow(QMainWindow):
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("🌐 ISAPI模式（推荐）", "isapi")
         self._mode_combo.addItem("🔌 SDK模式", "sdk")
+        # self._mode_combo.addItem("📦 HikLoad模式", "hikload")  # HikLoad模式已禁用
         self._mode_combo.setFixedWidth(180)
         # 根据当前模式设置选中项
         idx = 0 if self._download_mode == "isapi" else 1
@@ -1165,7 +1185,7 @@ class MainWindow(QMainWindow):
             hb.addWidget(b)
         dl.addLayout(hb)
         dg.setLayout(dl)
-        vbox.addWidget(dg)
+        vbox.addWidget(dg, 1)  # 设备管理窗口垂直比例小一些
 
         # 通道选择
         cg = QGroupBox("通道选择")
@@ -1198,7 +1218,7 @@ class MainWindow(QMainWindow):
         cl.addWidget(self._channel_count_label)
 
         cg.setLayout(cl)
-        vbox.addWidget(cg)
+        vbox.addWidget(cg, 3)  # 通道选择窗口垂直比例大一些
 
         # 时间选择
         tg = QGroupBox("录像时间范围")
@@ -1248,6 +1268,9 @@ class MainWindow(QMainWindow):
         tg.setLayout(tl)
         vbox.addWidget(tg)
 
+        # 底部留白，与右侧版权信息对齐
+        vbox.addStretch(1)
+
         return w
 
     def _make_right_panel(self) -> QWidget:
@@ -1259,28 +1282,16 @@ class MainWindow(QMainWindow):
         task_l = QVBoxLayout()
 
         self._table = QTableWidget()
-        self._table.setColumnCount(8)
+        self._table.setColumnCount(7)
         self._table.setHorizontalHeaderLabels(
-            ["设备", "通道", "开始时间", "结束时间", "录像大小", "状态", "下载进度", "转码进度"]
+            ["设备", "通道", "开始时间", "结束时间", "录像大小", "状态", "下载进度"]
         )
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft)
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._on_table_context_menu)
-        # 根据当前模式调整表格列
-        self._apply_mode_to_table()
         task_l.addWidget(self._table)
-
-        hb = QHBoxLayout()
-        btn_clear = QPushButton("清除已完成")
-        btn_clear.clicked.connect(self._clear_completed)
-        hb.addWidget(btn_clear)
-
-        hb.addStretch()
-        self._stats_label = QLabel("任务: 0 | 完成: 0 | 失败: 0")
-        hb.addWidget(self._stats_label)
-        task_l.addLayout(hb)
 
         # 开始/停止下载按钮行
         hb_ctrl = QHBoxLayout()
@@ -1296,15 +1307,32 @@ class MainWindow(QMainWindow):
         self._btn_stop.clicked.connect(self._stop_download)
         hb_ctrl.addWidget(self._btn_stop)
 
+        btn_clear = QPushButton("清除已完成")
+        btn_clear.setStyleSheet("QPushButton { background-color: #2196F3; color: white; font-weight: bold; padding: 6px 18px; }")
+        btn_clear.clicked.connect(self._clear_completed)
+        hb_ctrl.addWidget(btn_clear)
+
         hb_ctrl.addStretch()
         task_l.addLayout(hb_ctrl)
 
         task_g.setLayout(task_l)
         vbox.addWidget(task_g)
 
-        # 容量信息面板
-        size_g = QGroupBox("📊 容量信息")
+        # 下载任务信息面板
+        size_g = QGroupBox("📊 下载任务信息")
         size_l = QHBoxLayout()
+
+        self._task_stats_label = QLabel("任务: 0 | 完成: 0 | 失败: 0")
+        self._task_stats_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #333;")
+        size_l.addWidget(self._task_stats_label)
+
+        size_l.addWidget(self._make_separator())
+
+        self._estimate_label = QLabel("预计大小: --")
+        self._estimate_label.setStyleSheet("font-size: 13px; color: #666;")
+        size_l.addWidget(self._estimate_label)
+
+        size_l.addWidget(self._make_separator())
 
         self._disk_free_label = QLabel("磁盘剩余: --")
         self._disk_free_label.setStyleSheet("font-size: 13px;")
@@ -1326,7 +1354,6 @@ class MainWindow(QMainWindow):
         
         # 互斥菜单切换
         chk_layout = QHBoxLayout()
-        self._log_view_mode = "run"  # 默认显示运行日志
         self._radio_run_log = QPushButton("📋 运行日志")
         self._radio_run_log.setCheckable(True)
         self._radio_run_log.setChecked(True)
@@ -1376,32 +1403,22 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _wire_signals(self):
-        print("[GUI] 连接信号...")
         self._progress_signal.connect(self._on_progress_ui)
-        self._transcode_progress_signal.connect(self._on_transcode_progress_ui)
         self._status_signal.connect(self._on_status_ui)
         self._log_signal.connect(self._on_log_signal)
         self._size_signal.connect(self._update_size_in_table)
+        self._estimate_signal.connect(self._on_estimate_done)
         self._multi_connect_result_signal.connect(self._on_multi_connect_result)
         self._show_channel_info_signal.connect(self._on_show_channel_info)
         
-        # 使用显式方法而不是lambda，避免闭包问题
         def on_progress(tid, p):
-            print(f"[GUI] 信号发射: tid={tid}, p={p}")
             self._progress_signal.emit(tid, p)
-        
-        def on_transcode_progress(tid, p):
-            """转码进度回调"""
-            print(f"[GUI] 转码进度信号: tid={tid}, p={p}")
-            self._transcode_progress_signal.emit(tid, p)
-        
+
         def on_status(task):
             self._status_signal.emit(task.task_id)
 
         def on_log(msg: str):
             """日志回调（从下载器转发到GUI）"""
-            print(f"[GUI on_log] 收到: {msg[:60]}...")
-            # 通过信号发送到主线程
             self._log_signal.emit(msg)
 
         def on_completion(task):
@@ -1412,11 +1429,9 @@ class MainWindow(QMainWindow):
             ))
 
         self._dm.set_progress_callback(on_progress)
-        self._dm.set_transcode_progress_callback(on_transcode_progress)
         self._dm.set_status_callback(on_status)
         self._dm.set_completion_callback(on_completion)
         self._dm.set_log_callback(on_log)
-        print("[GUI] 信号连接完成")
     
     def _on_log_signal(self, msg: str):
         """处理日志信号（在主线程执行）"""
@@ -1536,12 +1551,16 @@ class MainWindow(QMainWindow):
 
         # 保存设备通道信息
         self._device_channels[device_key] = channels
+        
+        # 缓存设备信息（包括正确的通道数）
+        if not hasattr(self, '_device_info_cache'):
+            self._device_info_cache = {}
+        self._device_info_cache[device_key] = dev_info
 
         # 更新通道树显示
         self._populate_channels()
 
-        # 启用开始下载按钮和加入列表按钮
-        self._btn_start.setEnabled(True)
+        # 启用加入列表按钮（开始下载按钮在加入列表后才启用）
         self._btn_add_tasks.setEnabled(True)
 
         sn = dev_info.get('serial', 'Unknown')
@@ -1604,6 +1623,15 @@ class MainWindow(QMainWindow):
                 log(f"❌ {cfg['name']} 查询失败: {msg}")
                 return
 
+            # 使用缓存的设备信息中的通道数（避免第二次登录计算错误）
+            device_key = f"{cfg['host']}:{cfg.get('port', 8000)}"
+            if hasattr(self, '_device_info_cache') and device_key in self._device_info_cache:
+                cached_dev = self._device_info_cache[device_key]
+                dev['total_ch'] = cached_dev['total_ch']
+                log(f"  使用缓存的通道数: {dev['total_ch']}个")
+            else:
+                log(f"  使用登录返回的通道数: {dev['total_ch']}个")
+
             # 使用ISAPI获取设备信息
             hdd_info = []
             system_status = {}
@@ -1622,7 +1650,11 @@ class MainWindow(QMainWindow):
                         capacity = hdd.get('capacity', 0)
                         free = hdd.get('free', 0)
                         status = hdd.get('status', '未知')
+                        serial = hdd.get('serial_number', '')
+                        model = hdd.get('model', '')
                         log(f"     盘位{hdd_id}: {hdd_name} | {capacity}GB | 可用{free}GB | {status}")
+                        if serial or model:
+                            log(f"             序列号: {serial} | 型号: {model}")
                 else:
                     log(f"  ⚠️ 未获取到硬盘信息")
                 
@@ -1711,8 +1743,12 @@ class MainWindow(QMainWindow):
                     capacity = hdd.get('capacity', 0)
                     free = hdd.get('free', 0)
                     used = capacity - free
+                    serial = hdd.get('serial_number', '')
+                    model = hdd.get('model', '')
                     name_str = f" ({hdd_name})" if hdd_name else ""
                     result_text += f"\n  盘位{hdd_id}{name_str}: {status} | 总容量: {capacity}GB | 已用: {used}GB | 可用: {free}GB"
+                    if serial or model:
+                        result_text += f"\n           序列号: {serial} | 型号: {model}"
             else:
                 result_text += "\n  (未获取到硬盘信息)"
 
@@ -1811,7 +1847,9 @@ class MainWindow(QMainWindow):
                 self, f"设备查询 - {cfg['name']}", result_text
             ))
 
-            log(f"✅ {cfg['name']} 查询完成: 序列号:{dev.get('serial', 'Unknown')}, 通道:{dev.get('total_ch', 0)}个")
+            # 日志中同时显示硬盘信息和序列号
+            hdd_count = len(hdd_info) if hdd_info else 0
+            log(f"✅ {cfg['name']} 查询完成: 序列号:{dev.get('serial', 'Unknown')}, 通道:{dev.get('total_ch', 0)}个, 硬盘:{hdd_count}块")
 
         except Exception as e:
             QTimer.singleShot(0, lambda: QMessageBox.warning(
@@ -1821,15 +1859,11 @@ class MainWindow(QMainWindow):
 
     def _on_query_channel_info_clicked(self):
         """菜单点击回调"""
-        self._log_msg("[DEBUG] ========== 菜单被点击 ==========")
         self._query_channel_info()
         
     def _query_channel_info(self):
         """查询通道详细信息（分辨率、码率、编码等）"""
-        self._log_msg("[DEBUG] _query_channel_info 被调用")
-        
         selected_rows = [i.row() for i in self._device_list.selectionModel().selectedRows()]
-        self._log_msg(f"[DEBUG] 选中的行: {selected_rows}")
         
         if not selected_rows:
             QMessageBox.information(self, "提示", "请先在设备列表中选择一台设备")
@@ -1841,29 +1875,17 @@ class MainWindow(QMainWindow):
         
         cfg = self.devices[selected_rows[0]]
         self._log_msg(f"🔍 正在查询通道信息: {cfg['name']} ({cfg['host']})...")
-        self._log_msg(f"[DEBUG] 准备启动后台线程，设备配置: {cfg.get('name', 'N/A')}")
         
-        try:
-            import threading
-            
-            # 包装目标函数以捕获异常
-            def wrapped_query(cfg):
-                try:
-                    self._log_msg("[DEBUG] 线程内: 开始执行 _do_query_channel_info")
-                    self._do_query_channel_info(cfg)
-                    self._log_msg("[DEBUG] 线程内: _do_query_channel_info 执行完成")
-                except Exception as e:
-                    import traceback
-                    self._log_msg(f"[DEBUG] 线程内异常: {e}")
-                    self._log_msg(f"[DEBUG] 线程内异常详情: {traceback.format_exc()}")
-            
-            t = threading.Thread(target=wrapped_query, args=(cfg,), daemon=True)
-            t.start()
-            self._log_msg(f"[DEBUG] 后台线程已启动")
-        except Exception as e:
-            self._log_msg(f"[DEBUG] 启动线程失败: {e}")
-            import traceback
-            self._log_msg(f"[DEBUG] 错误详情: {traceback.format_exc()}")
+        def wrapped_query(cfg):
+            try:
+                self._do_query_channel_info(cfg)
+            except Exception as e:
+                import traceback
+                self._log_msg(f"查询通道信息失败: {e}")
+                self._log_msg(f"详情: {traceback.format_exc()}")
+        
+        t = threading.Thread(target=wrapped_query, args=(cfg,), daemon=True)
+        t.start()
 
     def _do_query_channel_info(self, cfg: Dict):
         """执行通道信息查询（在后台线程）"""
@@ -1871,12 +1893,8 @@ class MainWindow(QMainWindow):
         def log(msg: str):
             self._log_signal.emit(msg)
         
-        log(f"[DEBUG] ========== _do_query_channel_info 开始执行 ==========")
-        
         try:
             from core.nvr_api import create_isapi
-            
-            log(f"[DEBUG] 开始查询通道信息: {cfg['name']}")
             
             api = create_isapi({
                 'host': cfg['host'],
@@ -1885,11 +1903,9 @@ class MainWindow(QMainWindow):
                 'password': cfg.get('password', ''),
             })
             
-            log(f"[DEBUG] ISAPI对象创建成功")
-            
             # 获取通道流信息
             stream_info = api.get_channel_stream_info()
-            log(f"[DEBUG] 获取到 {len(stream_info)} 个通道的流信息")
+            log(f"  [DEBUG] 获取到 {len(stream_info)} 个通道的流信息: {list(stream_info.keys())}")
             
             if not stream_info:
                 log(f"⚠️ {cfg['name']}: 未获取到通道流信息")
@@ -1900,24 +1916,28 @@ class MainWindow(QMainWindow):
             
             # 获取通道名称和在线状态
             channels_with_status = api.get_channels_with_status()
-            log(f"[DEBUG] 获取到 {len(channels_with_status)} 个通道的状态信息")
             
             # 准备表格数据
             table_data = []
-            log(f"[DEBUG] 开始构建表格数据，通道数: {len(stream_info)}")
             
             for ch_no in sorted(stream_info.keys()):
                 try:
                     info = stream_info[ch_no]
                     main_stream = info.get('main_stream', {})
                     sub_stream = info.get('sub_stream', {})
+                    
+                    # DEBUG: 打印前几个通道的流信息详情
+                    if ch_no <= 5:
+                        log(f"  [DEBUG] 通道{ch_no}: main_stream={main_stream}, sub_stream={sub_stream}")
                     ch_status = channels_with_status.get(ch_no, {})
                     
                     # 构建编码格式显示
                     def build_codec_display(stream):
                         if not stream:
-                            return "未配置"
+                            return "-"  # 无流信息（通道离线或未配置码流）
                         codec = stream.get('codec', 'N/A')
+                        if codec == 'N/A':
+                            return "N/A"  # 有流信息但无法识别编码
                         codec_profile = stream.get('codec_profile', '')
                         smart_codec = stream.get('smart_codec', False)
                         smart_codec_type = stream.get('smart_codec_type', '')
@@ -1931,7 +1951,6 @@ class MainWindow(QMainWindow):
                         return display
                     
                     # 获取OSD名称 - 对于此NVR，OSD名称就是通道名称
-                    # 因为InputProxy接口没有独立的OSD元素，<name>标签就是OSD显示名称
                     osd_name = ch_status.get('name', f'通道{ch_no}')
                     
                     row = {
@@ -1954,56 +1973,35 @@ class MainWindow(QMainWindow):
                     }
                     table_data.append(row)
                 except Exception as row_e:
-                    log(f"[DEBUG] 处理通道 {ch_no} 时出错: {row_e}")
-                    import traceback
-                    log(f"[DEBUG] 错误详情: {traceback.format_exc()}")
-            
-            log(f"[DEBUG] 表格数据构建完成，共 {len(table_data)} 行")
-            
-            # 显示表格对话框（使用默认参数捕获当前值）
-            device_name = cfg['name']
-            log(f"[DEBUG] 准备显示对话框，设备名: {device_name}, 数据行数: {len(table_data)}")
+                    log(f"⚠️ 处理通道 {ch_no} 时出错: {row_e}")
             
             if table_data:
-                log(f"[DEBUG] 发送信号显示对话框: {device_name}")
-                self._show_channel_info_signal.emit(device_name, table_data)
+                self._show_channel_info_signal.emit(cfg['name'], table_data)
             else:
                 log(f"⚠️ {cfg['name']}: 表格数据为空，无法显示对话框")
-                # 使用信号在主线程显示警告
-                self._log_signal.emit(f"SHOW_WARNING|{cfg['name']}|查询结果为空|未能构建通道信息表格")
             
             log(f"✅ {cfg['name']}: 获取到 {len(stream_info)} 个通道的流信息")
             
         except Exception as e:
             import traceback
-            error_detail = traceback.format_exc()
             log(f"❌ {cfg['name']} 查询通道信息异常: {e}")
-            log(f"[DEBUG] 异常详情: {error_detail}")
             QTimer.singleShot(0, lambda: QMessageBox.warning(
                 self, "查询异常", f"{cfg['name']}: {str(e)}"
             ))
 
     def _on_show_channel_info(self, device_name: str, table_data: list):
         """信号处理：显示通道信息表格对话框"""
-        self._log_msg(f"[DEBUG] _on_show_channel_info 被调用，设备: {device_name}, 数据行数: {len(table_data)}")
         try:
             # 查找设备配置
-            device_config = None
-            for dev in self.devices:
-                if dev['name'] == device_name:
-                    device_config = dev
-                    break
+            device_config = next((dev for dev in self.devices if dev['name'] == device_name), None)
             
             dialog = ChannelInfoDialog(device_name, table_data, device_config, self)
             # 连接OSD更新信号
             dialog.osd_update_signal.connect(self._on_osd_update_requested)
-            self._log_msg("[DEBUG] ChannelInfoDialog 创建成功，准备显示")
             dialog.exec_()
-            self._log_msg("[DEBUG] ChannelInfoDialog 已关闭")
         except Exception as e:
             import traceback
-            self._log_msg(f"[DEBUG] 显示对话框异常: {e}")
-            self._log_msg(f"[DEBUG] 异常详情: {traceback.format_exc()}")
+            self._log_msg(f"❌ 显示通道信息对话框失败: {e}")
             QMessageBox.warning(self, "显示失败", f"无法显示通道信息对话框:\n{str(e)}")
     
     def _on_osd_update_requested(self, osd_updates: list, device_config: dict):
@@ -2070,7 +2068,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             import traceback
             log(f"❌ [OSD] 批量更新异常: {e}")
-            log(f"[DEBUG] 异常详情: {traceback.format_exc()}")
             QTimer.singleShot(0, lambda: QMessageBox.warning(
                 self, "OSD更新失败", f"批量更新OSD时发生错误:\n{str(e)}"
             ))
@@ -2090,9 +2087,11 @@ class MainWindow(QMainWindow):
         self._channel_tree.clear()
         self._channel_count_label.setText("获取中...")
 
+        # 启动后台连接线程
         self._connect_worker = ConnectWorker(self._current_config)
         self._connect_worker.result_ready.connect(self._on_connect_result)
         self._connect_worker.start()
+        self._log_msg(f"✓ 连接线程已启动，等待响应...")
 
     def _refresh_channels(self):
         """刷新通道 - 支持多选设备同时刷新"""
@@ -2165,8 +2164,7 @@ class MainWindow(QMainWindow):
             self._device_channels[device_key] = channels
             self._populate_channels()
 
-            # 启用开始下载按钮和加入列表按钮
-            self._btn_start.setEnabled(True)
+            # 启用加入列表按钮（开始下载按钮在加入列表后才启用）
             self._btn_add_tasks.setEnabled(True)
 
             sn = dev.get('serial', 'Unknown')
@@ -2195,7 +2193,7 @@ class MainWindow(QMainWindow):
 
         # 更新通道树显示（支持多设备）
         self._populate_channels()
-        self._btn_start.setEnabled(True)
+        # 启用加入列表按钮（开始下载按钮在加入列表后才启用）
         self._btn_add_tasks.setEnabled(True)
 
         sn = dev_info.get('serial', '')
@@ -2245,13 +2243,13 @@ class MainWindow(QMainWindow):
                 is_online = ch.get('online', True)
 
                 if is_online:
-                    # 在线通道：正常显示
-                    ch_item.setText(0, ch_name)
+                    # 在线通道：正常显示，名称前加上序号
+                    ch_item.setText(0, f"{ch['id']}. {ch_name}")
                     ch_item.setCheckState(0, Qt.Unchecked)
                     ch_item.setForeground(0, ch_item.foreground(0))  # 默认颜色
                 else:
-                    # 离线通道：灰色显示，名称后加 [离线] 标注
-                    ch_item.setText(0, f"{ch_name}  [离线]")
+                    # 离线通道：灰色显示，名称前加上序号，名称后加 [离线] 标注
+                    ch_item.setText(0, f"{ch['id']}. {ch_name}  [离线]")
                     ch_item.setCheckState(0, Qt.Unchecked)
                     from PyQt5.QtGui import QColor
                     ch_item.setForeground(0, QColor(150, 150, 150))  # 灰色
@@ -2345,6 +2343,19 @@ class MainWindow(QMainWindow):
         added_count = 0
         device_groups = {}
 
+        # ISAPI模式：先同步探测每个任务的大小，再加入列表
+        # 这样加入时就能显示实际大小
+        device_probe_results: Dict[str, int] = {}  # {task_id: size_bytes}
+
+        if self._download_mode == "isapi":
+            self._estimate_label.setText("预计大小: 探测中...")
+            self._estimate_label.setStyleSheet("font-size: 13px; color: #FF9800;")
+        # elif self._download_mode == "hikload":  # HikLoad模式已禁用
+        #     self._estimate_label.setText("预计大小: RTSP流式下载")
+        #     self._estimate_label.setStyleSheet("font-size: 13px; color: #2196F3;")
+
+        # 第一步：收集所有任务信息（先创建任务对象用于关联task_id）
+        new_tasks: List[Tuple[DownloadTask, Dict, Dict]] = []  # (task, device_config, channel)
         for ch in selected:
             device = ch.get('device') or self._current_config
             if not device:
@@ -2363,27 +2374,88 @@ class MainWindow(QMainWindow):
                 }
             device_groups[device_key]['channels'].append(ch)
 
-        for device_key, group in device_groups.items():
-            device_config = group['config']
-            for ch in group['channels']:
-                task = DownloadTask(
-                    task_id      = str(uuid.uuid4()),
-                    device_id    = device_key,
-                    device_name  = device_config.get('name', device_config['host']),
-                    device_config = device_config,
-                    channel_id   = str(ch.get('no', ch.get('id', '1'))),
-                    channel_name = ch.get('name', f"通道{ch.get('id','?')}"),
-                    start_time   = start_dt,
-                    end_time     = end_dt,
-                    save_dir     = self.download_dir,
-                    merge_mode   = getattr(self, '_merge_mode', 'standard'),
-                    enable_debug_log = getattr(self, '_enable_debug_log', False),
-                    skip_transcode = getattr(self, '_skip_transcode', True),
-                )
+            # 创建临时任务对象（仅用于生成task_id）
+            task = DownloadTask(
+                task_id      = str(uuid.uuid4()),
+                device_id    = device_key,
+                device_name  = device_groups[device_key]['config'].get('name', device_groups[device_key]['config']['host']),
+                device_config = device_groups[device_key]['config'],
+                channel_id   = str(ch.get('no', ch.get('id', '1'))),
+                channel_name = ch.get('name', f"通道{ch.get('id','?')}"),
+                start_time   = start_dt,
+                end_time     = end_dt,
+                save_dir     = self.download_dir,
+                merge_mode   = getattr(self, '_merge_mode', 'standard'),
+                enable_debug_log = getattr(self, '_enable_debug_log', False),
+                skip_transcode = getattr(self, '_skip_transcode', True),
+            )
+            new_tasks.append((task, device_groups[device_key]['config'], ch))
 
-                self._pending_tasks.append(task)
-                self._add_row(task)
-                added_count += 1
+        # 第二步：ISAPI同步探测每个任务大小（最多重试5次）
+        # - 离线设备跳过探测，表格显示"离线"
+        # - 在线设备探测失败则重试，最多重试5次
+        MAX_RETRIES = 5
+        offline_task_ids = []  # 离线任务列表
+
+        if self._download_mode == "isapi" and new_tasks:
+            from core.nvr_api import create_isapi
+            from PyQt5.QtCore import QMetaObject, Qt
+            
+            # 调试：打印设备配置
+            if new_tasks:
+                _, first_dev_cfg, _ = new_tasks[0]
+                print(f"[PROBE DEBUG] 设备配置: {first_dev_cfg}")
+
+            for task, dev_cfg, ch in new_tasks:
+                # 跳过离线通道（online 是布尔值 True/False）
+                if not ch.get('online', True):
+                    offline_task_ids.append(task.task_id)
+                    continue
+
+                size = 0
+                for attempt in range(1, MAX_RETRIES + 1):
+                    try:
+                        api = create_isapi(dev_cfg)
+                        ch_no = int(ch.get('no', ch.get('id', 1)))
+                        size = api.probe_record_size(
+                            channel=ch_no,
+                            start_time=start_dt,
+                            end_time=end_dt,
+                            stream_type=1,
+                            rtsp_port=dev_cfg.get('rtsp_port', 554),
+                        )
+                        if size > 0:
+                            break  # 成功，退出重试循环
+                        elif attempt == 1:
+                            print(f"[PROBE] 通道{ch_no} 探测返回 size={size}（可能无录像或接口不支持）")
+                    except Exception as e:
+                        if attempt == 1:
+                            print(f"[PROBE] 通道{ch_no} 探测异常: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+                    if attempt < MAX_RETRIES:
+                        time.sleep(0.3)  # 重试前等待300ms
+
+                if size > 0:
+                    device_probe_results[task.task_id] = size
+                    self._task_file_sizes[task.task_id] = size
+                else:
+                    # 5次探测全部失败，标记为探测失败
+                    device_probe_results[task.task_id] = -1  # -1 表示探测失败
+
+        # 第三步：正式加入列表
+        # offline_task_ids 中的任务显示"离线"（橙色）
+        # device_probe_results 中值为 -1 的任务显示"探测失败"（红色）
+        # 值为 > 0 的任务显示实际大小
+        # 其余（=0）显示"探测中..."（灰色）
+        for task, _, _ in new_tasks:
+            self._pending_tasks.append(task)
+            if task.task_id in offline_task_ids:
+                self._add_row(task, -2)  # -2 = 离线
+            else:
+                self._add_row(task, device_probe_results.get(task.task_id, 0))
+            added_count += 1
 
         # 启用开始下载按钮
         if self._pending_tasks:
@@ -2393,7 +2465,104 @@ class MainWindow(QMainWindow):
         self._update_disk_info()
 
         device_count = len(device_groups)
-        self._log_msg(f"📋 已加入 {added_count} 个下载任务（{device_count}台设备），点击「开始下载」执行")
+        probed = sum(1 for v in device_probe_results.values() if v > 0)
+        failed = sum(1 for v in device_probe_results.values() if v == -1)
+        offline = len(offline_task_ids)
+
+        # 更新预计大小标签（与日志一致）
+        if self._download_mode == "isapi":
+            if probed > 0:
+                total_probed_size = sum(v for v in device_probe_results.values() if v > 0)
+                parts = [f"预计大小: {self._format_bytes(total_probed_size)}"]
+                if failed > 0:
+                    parts.append(f"（{failed}个探测失败）")
+                if offline > 0:
+                    parts.append(f"（{offline}个离线）")
+                self._estimate_label.setText(" ".join(parts))
+                self._estimate_label.setStyleSheet("font-size: 13px; color: #333; font-weight: bold;")
+            else:
+                self._estimate_label.setText("预计大小: 探测失败")
+                self._estimate_label.setStyleSheet("font-size: 13px; color: #f44336;")
+        # elif self._download_mode == "hikload":  # HikLoad模式已禁用
+        #     self._estimate_label.setText("预计大小: RTSP流式下载")
+        #     self._estimate_label.setStyleSheet("font-size: 13px; color: #2196F3;")
+        else:
+            self._estimate_label.setText("预计大小: --")
+            self._estimate_label.setStyleSheet("font-size: 13px; color: #666;")
+
+        # 日志消息
+        if self._download_mode == "isapi":
+            if probed > 0:
+                parts = [f"已探测 {probed}/{len(new_tasks)} 个，大小合计 {self._format_bytes(total_probed_size)}"]
+                if failed > 0:
+                    parts.append(f"（{failed}个探测失败，设备可能不支持ISAPI下载）")
+                if offline > 0:
+                    parts.append(f"（{offline}个离线）")
+                self._log_msg(f"📋 已加入 {added_count} 个任务（{device_count}台设备），" + "，".join(parts))
+            else:
+                # 全部探测失败，提示用户切换模式
+                msg = f"📋 已加入 {added_count} 个任务（{device_count}台设备）"
+                if failed > 0:
+                    msg += f"，{failed}个探测失败"
+                    # 检查是否所有任务都探测失败
+                    if failed == len(new_tasks) - offline:
+                        msg += "（设备可能不支持ISAPI下载，请尝试切换到SDK模式）"
+                if offline > 0:
+                    msg += f"，{offline}个离线"
+                self._log_msg(msg + "，点击「开始下载」执行")
+        # elif self._download_mode == "hikload":  # HikLoad模式已禁用
+        #     self._log_msg(f"📋 已加入 {added_count} 个任务（{device_count}台设备）- RTSP流式下载模式，点击「开始下载」执行")
+        else:
+            self._log_msg(f"📋 已加入 {added_count} 个任务（{device_count}台设备），点击「开始下载」执行")
+
+    # ------------------------------------------------------------------ #
+    #  录像大小探测
+    # ------------------------------------------------------------------ #
+
+    def _probe_sizes_worker(self, probe_tasks, start_dt, end_dt):
+        """后台线程：逐个探测通道录像大小，汇总后通过信号通知主线程"""
+        from core.nvr_api import create_isapi
+
+        total_size = 0
+        ok_count = 0
+        fail_count = 0
+
+        for task_id, device_config, ch in probe_tasks:
+            try:
+                api = create_isapi(device_config)
+                ch_no = int(ch.get('no', ch.get('id', 1)))
+                size = api.probe_record_size(
+                    channel=ch_no,
+                    start_time=start_dt,
+                    end_time=end_dt,
+                    stream_type=1,
+                    rtsp_port=device_config.get('rtsp_port', 554),
+                )
+                if size > 0:
+                    total_size += size
+                    ok_count += 1
+                    # 同时更新表格中该任务的大小列
+                    self._task_file_sizes[task_id] = size
+                    self._size_signal.emit(task_id, size)
+                else:
+                    fail_count += 1
+            except Exception:
+                fail_count += 1
+
+        self._estimate_signal.emit(total_size, ok_count, fail_count)
+
+    def _on_estimate_done(self, total_size: int, ok_count: int, fail_count: int):
+        """主线程槽：探测完成后更新预计大小标签"""
+        if total_size > 0:
+            size_str = self._format_bytes(total_size)
+            parts = [f"预计大小: {size_str}"]
+            if fail_count > 0:
+                parts.append(f"（{ok_count}成功 {fail_count}失败）")
+            self._estimate_label.setText(" ".join(parts))
+            self._estimate_label.setStyleSheet("font-size: 13px; color: #333; font-weight: bold;")
+        else:
+            self._estimate_label.setText("预计大小: 探测失败")
+            self._estimate_label.setStyleSheet("font-size: 13px; color: #f44336;")
 
     def _make_separator(self) -> QWidget:
         """创建竖线分隔符"""
@@ -2427,32 +2596,73 @@ class MainWindow(QMainWindow):
 
 
 
+
+
+
+
     def _update_download_speed(self):
-        """计算并显示实时下载速度"""
+        """使用网卡速度显示下载速度"""
         now = time.time()
         total_speed = 0
         active_count = 0
 
-        for task_id, start_time in list(self._download_start_times.items()):
-            downloaded = self._downloaded_bytes.get(task_id, 0)
-            if downloaded > 0 and start_time > 0:
-                elapsed = now - start_time
+        try:
+            import psutil
+            # 获取网卡速度（发送+接收）
+            net_io = psutil.net_io_counters()
+            if self._last_net_io is not None and self._last_net_time > 0:
+                elapsed = now - self._last_net_time
                 if elapsed > 0:
-                    total_speed += downloaded / elapsed
-                    active_count += 1
+                    bytes_sent = net_io.bytes_sent - self._last_net_io.bytes_sent
+                    bytes_recv = net_io.bytes_recv - self._last_net_io.bytes_recv
+                    total_bytes = bytes_sent + bytes_recv
+                    total_speed = total_bytes / elapsed
+                    # 检查是否有活跃下载任务（下载中或合并中）
+                    for task_id in list(self._download_start_times.keys()):
+                        task = self._dm.get_task(task_id)
+                        if task and task.status in (DownloadStatus.DOWNLOADING, DownloadStatus.MERGING):
+                            active_count += 1
+            self._last_net_io = net_io
+            self._last_net_time = now
+        except Exception as e:
+            print(f"[速度监控] 异常: {e}")
 
         if active_count > 0 and total_speed > 0:
             speed_str = self._format_speed(total_speed)
-            self._speed_label.setText(f"下载速度: {speed_str} ({active_count}任务)")
+            self._speed_label.setText(f"网卡速度: {speed_str} ({active_count}任务)")
             self._speed_label.setStyleSheet("font-size: 13px; color: #2196F3; font-weight: bold;")
+        elif active_count > 0:
+            self._speed_label.setText(f"网卡速度: 计算中... ({active_count}任务)")
+            self._speed_label.setStyleSheet("font-size: 13px; color: #999;")
         else:
-            self._speed_label.setText("下载速度: --")
+            self._speed_label.setText("网卡速度: --")
             self._speed_label.setStyleSheet("font-size: 13px; color: #999;")
 
-    def _apply_mode_to_table(self):
-        """根据当前下载模式调整表格列显示：ISAPI模式隐藏转码进度列"""
-        is_sdk = (self._download_mode != "isapi")
-        self._table.setColumnHidden(7, not is_sdk)  # 第7列：转码进度
+        # 周期性检查：为已完成但大小仍为"—"的任务更新实际文件大小
+        self._refresh_completed_sizes()
+
+    def _refresh_completed_sizes(self):
+        """周期性检查已完成任务的文件大小，更新表格显示（后备机制）"""
+        for row in range(self._table.rowCount()):
+            item0 = self._table.item(row, 0)
+            if not item0:
+                continue
+            task_id = item0.data(Qt.UserRole)
+            size_item = self._table.item(row, 4)
+            if not size_item:
+                continue
+            # 只处理大小仍为初始值"—"的行
+            if size_item.text() == "—":
+                # 查找任务
+                task = self._dm.get_task(task_id)
+                if not task:
+                    task = next((t for t in self._pending_tasks if t.task_id == task_id), None)
+                if task and task.file_path and os.path.exists(task.file_path):
+                    actual_size = os.path.getsize(task.file_path)
+                    if actual_size > 0:
+                        self._task_file_sizes[task_id] = actual_size
+                        size_item.setText(self._format_bytes(actual_size))
+                        size_item.setForeground(QColor(51, 51, 51))
 
     @staticmethod
     def _format_bytes(num_bytes: int) -> str:
@@ -2535,6 +2745,92 @@ class MainWindow(QMainWindow):
             self._save_config()
             self._log_msg(f"[时间预设] 已保存 {len(self._time_presets)} 个预设")
 
+    def _show_help(self):
+        """显示使用说明对话框"""
+        help_text = """
+<h2>四川新数录像批量下载器 - 使用说明</h2>
+
+<h3>一、设备连接</h3>
+<ol>
+<li>点击「➕ 添加设备」按钮，输入 NVR/DVR 设备信息：
+    <ul>
+        <li><b>设备名称</b>：自定义名称，用于显示</li>
+        <li><b>IP地址</b>：设备的网络地址</li>
+        <li><b>HTTP端口</b>：默认 80 或 8000</li>
+        <li><b>RTSP端口</b>：默认 554</li>
+        <li><b>用户名/密码</b>：设备登录凭证</li>
+    </ul>
+</li>
+<li>支持添加多台设备，同时批量下载</li>
+</ol>
+
+<h3>二、通道选择</h3>
+<ol>
+<li>连接设备后，左侧显示通道树（按设备分组）</li>
+<li>勾选需要下载录像的通道</li>
+<li>设置下载的<b>时间范围</b>（开始时间~结束时间）</li>
+<li>可使用「时间预设」快速选择常用时间段</li>
+</ol>
+
+<h3>三、下载任务</h3>
+<ol>
+<li>点击「📋 加入列表」将选中通道添加到任务列表</li>
+<li>点击「▶ 开始下载」执行所有任务</li>
+<li>支持右键单个任务：开始/停止/重试/删除</li>
+</ol>
+
+<h3>四、下载模式说明</h3>
+<ul>
+<li><b>ISAPI模式</b>（推荐）：通过 HTTP API 下载，速度快、稳定性好</li>
+<li><b>SDK模式</b>：通过海康 SDK 下载，兼容性更广，支持大文件分段下载</li>
+</ul>
+
+<h3>五、常见问题</h3>
+<ul>
+<li><b>连接失败</b>：检查 IP、端口、用户名密码是否正确</li>
+<li><b>探测失败</b>：设备可能不支持 ISAPI 下载，请切换到 SDK 模式</li>
+<li><b>下载超时</b>：录像时间过长，可调整设置中的超时参数</li>
+</ul>
+
+<h3>六、技术支持</h3>
+<ul>
+<li>官方网站：<a href="http://www.scxs.vip">www.scxs.vip</a></li>
+</ul>
+"""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("使用说明")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(help_text)
+        msg.setStyleSheet("QLabel{min-width: 600px;}")
+        msg.exec_()
+
+    def _show_about(self):
+        """显示关于对话框"""
+        about_text = """
+<h2>四川新数录像批量下载器</h2>
+<p><b>版本：</b>1.0.0</p>
+<p><b>功能：</b>海康威视 NVR/DVR 录像批量下载工具</p>
+<hr>
+<p>支持功能：</p>
+<ul>
+    <li>多设备同时连接与下载</li>
+    <li>通道批量选择与时间范围设置</li>
+    <li>ISAPI / SDK 双下载模式</li>
+    <li>大文件自动分段与合并</li>
+    <li>OSD 通道名称批量设置</li>
+    <li>下载进度实时监控</li>
+</ul>
+<hr>
+<p><b>版权所有：四川新数信息技术有限公司</b></p>
+<p>官方网站：<a href="http://www.scxs.vip">www.scxs.vip</a></p>
+"""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("关于软件")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(about_text)
+        msg.setStyleSheet("QLabel{min-width: 400px;}")
+        msg.exec_()
+
     # ------------------------------------------------------------------ #
     #  下载操作
     # ------------------------------------------------------------------ #
@@ -2564,12 +2860,12 @@ class MainWindow(QMainWindow):
                 old_name = "ISAPI" if self._download_mode == "isapi" else "SDK"
                 self._download_mode = new_mode
                 new_name = "ISAPI" if new_mode == "isapi" else "SDK"
+                
                 # 同步工具栏下拉框
                 idx = 0 if new_mode == "isapi" else 1
                 self._mode_combo.blockSignals(True)
                 self._mode_combo.setCurrentIndex(idx)
                 self._mode_combo.blockSignals(False)
-                self._apply_mode_to_table()
                 self._log_msg(f"🔄 下载模式切换: {old_name} → {new_name}")
 
             # 如果下载管理器未运行，更新线程配置
@@ -2594,7 +2890,6 @@ class MainWindow(QMainWindow):
         mode_name = "ISAPI" if mode == "isapi" else "SDK"
         old_name = "ISAPI" if old_mode == "isapi" else "SDK"
         self._log_msg(f"🔄 下载模式切换: {old_name} → {mode_name}")
-        self._apply_mode_to_table()
         self._save_config()
 
 
@@ -2627,11 +2922,12 @@ class MainWindow(QMainWindow):
         now_ts = time.time()
         for task in all_tasks:
             self._download_start_times[task.task_id] = now_ts
-            self._downloaded_bytes[task.task_id] = 0
 
         # 根据模式选择不同的下载引擎
         if self._download_mode == "isapi":
             self._start_isapi_download(all_tasks)
+        # elif self._download_mode == "hikload":  # HikLoad模式已禁用
+        #     self._start_hikload_download(all_tasks)
         else:
             # SDK模式（默认）
             self._start_sdk_download(all_tasks)
@@ -2775,6 +3071,7 @@ class MainWindow(QMainWindow):
 
                 api = create_isapi(config)
 
+
                 def _progress(pct):
                     task.progress = pct
                     self._progress_signal.emit(task.task_id, pct)
@@ -2808,11 +3105,7 @@ class MainWindow(QMainWindow):
                 if success:
                     task.status = DownloadStatus.COMPLETED
                     task.progress = 100
-                    # 更新实际文件大小和表格显示
-                    if os.path.exists(task.file_path):
-                        actual_size = os.path.getsize(task.file_path)
-                        self._task_file_sizes[task.task_id] = actual_size
-                        self._update_size_in_table(task.task_id, actual_size)
+                    # 录像大小在 _cleanup_speed_tracking 中通过主线程统一更新（线程安全）
                     self._log_signal.emit(f"✓ ISAPI下载完成: {task.channel_name} - {msg}, 耗时:{elapsed:.1f}s")
                 else:
                     task.status = DownloadStatus.FAILED
@@ -2839,6 +3132,144 @@ class MainWindow(QMainWindow):
             # 释放全局信号量
             global_sem.release()
 
+    def _start_hikload_download(self, tasks: List[DownloadTask]):
+        """HikLoad模式下载：使用RTSP+FFmpeg流式下载"""
+        from core.hikload_downloader import HikLoadDownloader
+        from datetime import datetime
+        import threading
+
+        self._log_msg("🚀 开始 HikLoad 批量下载（RTSP+FFmpeg）...")
+
+        # 按设备分组任务
+        device_tasks = {}
+        for task in tasks:
+            device_key = task.device_id or "unknown"
+            if device_key not in device_tasks:
+                device_tasks[device_key] = []
+            device_tasks[device_key].append(task)
+
+        # 为每个设备启动一个HikLoad下载线程
+        for device_key, task_list in device_tasks.items():
+            if not task_list:
+                continue
+
+            # 获取设备配置
+            device_config = task_list[0].device_config or {}
+            host = device_config.get('host', 'unknown')
+            username = device_config.get('username', 'admin')
+            password = device_config.get('password', '')
+
+            # 创建停止事件
+            stop_event = threading.Event()
+            for task in task_list:
+                self._isapi_stop_events[task.task_id] = stop_event
+
+            # 启动HikLoad下载线程
+            t = threading.Thread(
+                target=self._hikload_download_worker,
+                args=(host, username, password, task_list, stop_event),
+                name=f"HikLoad-{device_key}",
+                daemon=True
+            )
+            t.start()
+
+        self._log_msg(f"✓ 已启动 {len(device_tasks)} 个HikLoad下载线程")
+
+    def _hikload_download_worker(self, host: str, username: str, password: str,
+                                   tasks: List[DownloadTask], stop_event: threading.Event):
+        """HikLoad下载工作线程：批量下载单个设备的多个通道"""
+        from core.hikload_downloader import HikLoadDownloader
+        from datetime import datetime
+
+        # 创建HikLoad下载器
+        downloader = HikLoadDownloader(
+            nvr_ip=host,
+            username=username,
+            password=password,
+            download_path=self.download_dir,
+            video_format="mkv",
+            use_ffmpeg=True,
+            folder_structure="onepercamera"
+        )
+
+        # 设置日志回调
+        def log_callback(msg):
+            self._log_signal.emit(f"[HikLoad-{host}] {msg}")
+
+        # 设置进度回调
+        def progress_callback(percent, status):
+            # HikLoad批量下载，整体进度
+            overall_progress = min(100, max(0, percent))
+            for task in tasks:
+                task.progress = overall_progress
+                self._progress_signal.emit(task.task_id, overall_progress)
+
+        downloader.set_log_callback(log_callback)
+        downloader.set_progress_callback(progress_callback)
+
+        # 准备下载参数
+        camera_ids = [task.channel_id for task in tasks]
+        start_time = tasks[0].start_time
+        end_time = tasks[0].end_time
+
+        # 更新所有任务状态为下载中
+        for task in tasks:
+            task.status = DownloadStatus.DOWNLOADING
+            self._status_signal.emit(task.task_id)
+            self._download_start_times[task.task_id] = time.time()
+
+        try:
+            # 批量下载
+            results = downloader.download_videos(
+                camera_ids=camera_ids,
+                start_time=start_time,
+                end_time=end_time,
+                concat_videos=True
+            )
+
+            # 处理结果
+            success_videos = {v['camera_id']: v for v in results['videos']}
+
+            for task in tasks:
+                if stop_event.is_set():
+                    task.status = DownloadStatus.CANCELLED
+                    self._status_signal.emit(task.task_id)
+                    continue
+
+                channel_id = task.channel_id
+                if channel_id in success_videos:
+                    # 下载成功
+                    video_info = success_videos[channel_id]
+                    task.status = DownloadStatus.COMPLETED
+                    task.filepath = video_info['filepath']
+                    task.filesize = video_info['size']
+
+                    # 更新文件大小
+                    self._task_file_sizes[task.task_id] = video_info['size']
+                    self._size_signal.emit(task.task_id, video_info['size'])
+
+                    self._log_signal.emit(f"✓ 通道 {channel_id} 下载完成: {video_info['filepath']}")
+                else:
+                    # 下载失败
+                    task.status = DownloadStatus.FAILED
+                    self._log_signal.emit(f"✗ 通道 {channel_id} 下载失败")
+
+                self._status_signal.emit(task.task_id)
+                task.progress = 100
+                self._progress_signal.emit(task.task_id, 100)
+
+            self._log_signal.emit(f"✓ HikLoad下载完成: 成功 {results['success']} 个，失败 {results['failed']} 个")
+
+        except Exception as e:
+            logger.error(f"HikLoad下载异常", exc_info=True)
+            self._log_signal.emit(f"✗ HikLoad下载失败: {str(e)}")
+
+            # 所有任务标记为失败
+            for task in tasks:
+                task.status = DownloadStatus.FAILED
+                self._status_signal.emit(task.task_id)
+                task.progress = 0
+                self._progress_signal.emit(task.task_id, 0)
 
     def _start_download_direct(self):
         """直接下载（兼容旧流程：不经过加入列表，直接从选中通道下载）"""
@@ -2901,7 +3332,6 @@ class MainWindow(QMainWindow):
         now_ts = time.time()
         for task in all_tasks:
             self._download_start_times[task.task_id] = now_ts
-            self._downloaded_bytes[task.task_id] = 0
 
         # 根据模式选择下载引擎
         if self._download_mode == "isapi":
@@ -2970,8 +3400,22 @@ class MainWindow(QMainWindow):
             QMenu::item:disabled { color: #aaa; }
         """)
 
+        # 开始下载：仅对等待中(PENDING)的任务可用
+        can_start = task.status == DownloadStatus.PENDING
+        action_start = menu.addAction("▶ 开始下载此任务")
+        action_start.setEnabled(can_start)
+        action_start.triggered.connect(lambda checked, t=task: self._start_single_task(t))
+
+        # 重新下载：仅对失败或已取消的任务可用
+        can_retry = task.status in (DownloadStatus.FAILED, DownloadStatus.CANCELLED)
+        action_retry = menu.addAction("🔄 重新下载")
+        action_retry.setEnabled(can_retry)
+        action_retry.triggered.connect(lambda checked, t=task: self._retry_single_task(t))
+
+        menu.addSeparator()
+
         # 停止按钮：仅对等待中或下载中的任务可用
-        can_stop = task.status in (DownloadStatus.PENDING, DownloadStatus.DOWNLOADING)
+        can_stop = task.status in (DownloadStatus.PENDING, DownloadStatus.DOWNLOADING, DownloadStatus.MERGING)
         action_stop = menu.addAction("⏹ 停止此任务")
         action_stop.setEnabled(can_stop)
         action_stop.triggered.connect(lambda checked, tid=task_id, t=task: self._stop_single_task(tid, t))
@@ -2979,10 +3423,18 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
 
         # 删除按钮：仅对非下载中的任务可用
-        can_delete = task.status != DownloadStatus.DOWNLOADING
+        can_delete = task.status not in (DownloadStatus.DOWNLOADING, DownloadStatus.MERGING)
         action_delete = menu.addAction("🗑 删除此任务")
         action_delete.setEnabled(can_delete)
         action_delete.triggered.connect(lambda checked, tid=task_id, t=task: self._delete_single_task(tid, t))
+
+        menu.addSeparator()
+
+        # 打开文件位置：仅对已完成的任务可用
+        can_open = task.status == DownloadStatus.COMPLETED and task.file_path and os.path.exists(task.file_path)
+        action_open = menu.addAction("📁 打开文件位置")
+        action_open.setEnabled(can_open)
+        action_open.triggered.connect(lambda checked, fp=task.file_path: self._open_file_location(fp))
 
         menu.exec_(self._table.viewport().mapToGlobal(pos))
 
@@ -3026,9 +3478,9 @@ class MainWindow(QMainWindow):
         if row >= 0:
             self._table.removeRow(row)
 
+
         # 清理相关跟踪数据
         self._task_file_sizes.pop(task_id, None)
-        self._downloaded_bytes.pop(task_id, None)
         self._download_start_times.pop(task_id, None)
         self._isapi_stop_events.pop(task_id, None)
 
@@ -3039,6 +3491,64 @@ class MainWindow(QMainWindow):
         if self._table.rowCount() == 0:
             self._btn_start.setEnabled(len(self._pending_tasks) > 0)
             self._btn_stop.setEnabled(False)
+
+    def _start_single_task(self, task: DownloadTask):
+        """开始下载单个任务"""
+        if task.status != DownloadStatus.PENDING:
+            return
+        
+        # 根据下载模式启动单个任务
+        if self._download_mode == "isapi":
+            self._start_isapi_download([task])
+        else:
+            self._dm.add_task(task)
+            self._dm.start()
+        
+        self._btn_start.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._log_msg(f"▶ 开始下载: {task.channel_name}")
+
+    def _retry_single_task(self, task: DownloadTask):
+        """重新下载失败/取消的任务"""
+        if task.status not in (DownloadStatus.FAILED, DownloadStatus.CANCELLED):
+            return
+        
+        # 重置任务状态
+        task.status = DownloadStatus.PENDING
+        task.progress = 0
+        task.error_message = ""
+        
+        # 更新表格显示
+        self._status_signal.emit(task.task_id)
+        
+        # 启动下载
+        if self._download_mode == "isapi":
+            self._start_isapi_download([task])
+        else:
+            # SDK模式：重新添加到队列
+            self._dm.add_task(task)
+            self._dm.start()
+        
+        self._btn_start.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._log_msg(f"🔄 重新下载: {task.channel_name}")
+
+    def _open_file_location(self, file_path: str):
+        """打开文件所在目录"""
+        if not file_path or not os.path.exists(file_path):
+            QMessageBox.warning(self, "提示", "文件不存在")
+            return
+        
+        # Windows: 选中文件并打开目录
+        import subprocess
+        try:
+            subprocess.run(['explorer', '/select,', os.path.abspath(file_path)], check=False)
+        except Exception as e:
+            # 回退：只打开目录
+            try:
+                os.startfile(os.path.dirname(file_path))
+            except Exception:
+                QMessageBox.warning(self, "提示", f"无法打开目录: {e}")
 
     def _clear_completed(self):
         self._dm.clear_completed()
@@ -3051,7 +3561,14 @@ class MainWindow(QMainWindow):
     #  任务表格
     # ------------------------------------------------------------------ #
 
-    def _add_row(self, task: DownloadTask):
+    def _add_row(self, task: DownloadTask, initial_size: int = 0):
+        """
+        添加一行任务到表格。
+
+        Args:
+            task:         下载任务
+            initial_size: 初始录像大小（字节）；>0=直接显示大小，0=显示"探测中..."
+        """
         row = self._table.rowCount()
         self._table.insertRow(row)
 
@@ -3065,9 +3582,20 @@ class MainWindow(QMainWindow):
         self._table.setItem(row, 2, item(task.start_time.strftime("%m-%d %H:%M")))
         self._table.setItem(row, 3, item(task.end_time.strftime("%m-%d %H:%M")))
 
-        # 录像大小（第4列）- 下载完成后显示
-        size_item = item("—")
-        size_item.setForeground(QColor(128, 128, 128))
+        # 录像大小（第4列）
+        # initial_size: >0=实测大小(深灰)  0=探测中(灰)  -1=探测失败(红)  -2=离线(橙)
+        if initial_size > 0:
+            size_item = item(self._format_bytes(initial_size))
+            size_item.setForeground(QColor(51, 51, 51))
+        elif initial_size == -1:
+            size_item = item("探测失败")
+            size_item.setForeground(QColor(244, 67, 54))  # 红色
+        elif initial_size == -2:
+            size_item = item("离线")
+            size_item.setForeground(QColor(255, 152, 0))  # 橙色
+        else:
+            size_item = item("探测中...")
+            size_item.setForeground(QColor(160, 160, 160))
         self._table.setItem(row, 4, size_item)
 
         status_item = QTableWidgetItem(STATUS_TEXT[task.status])
@@ -3080,14 +3608,6 @@ class MainWindow(QMainWindow):
         download_bar.setValue(task.progress)
         download_bar.setTextVisible(True)
         self._table.setCellWidget(row, 6, download_bar)
-
-        # 转码进度条（第7列）- 仅SDK模式显示
-        if self._download_mode != "isapi":
-            transcode_bar = QProgressBar()
-            transcode_bar.setRange(0, 100)
-            transcode_bar.setValue(0)
-            transcode_bar.setTextVisible(True)
-            self._table.setCellWidget(row, 7, transcode_bar)
 
         # 在第0列存task_id
         self._table.item(row, 0).setData(Qt.UserRole, task.task_id)
@@ -3104,30 +3624,69 @@ class MainWindow(QMainWindow):
     #  回调槽（主线程）
     # ------------------------------------------------------------------ #
 
-    def _update_size_in_table(self, task_id: str, size_bytes: int):
-        """下载完成后更新表格中的录像大小列"""
+    def _update_size_in_table(self, task_id: str, size_bytes: int, is_estimate: bool = False):
+        """
+        更新表格中的录像大小列。
+
+        Args:
+            task_id:    任务ID
+            size_bytes: 文件大小（字节）；若 <= 0 且 is_estimate=True 则根据码率×时长估算
+            is_estimate: True=估算大小（橙色显示"估算: X MB"），False=实测大小（深灰显示）
+        """
         row = self._find_row(task_id)
-        if row >= 0:
-            item = self._table.item(row, 4)
-            if item:
-                size_str = self._format_bytes(size_bytes)
-                item.setText(size_str)
-                item.setForeground(QColor(51, 51, 51))
+        if row < 0:
+            return
+
+        item = self._table.item(row, 4)
+        if not item:
+            return
+
+        # ISAPI探测成功：显示实测大小
+        if size_bytes > 0:
+            item.setText(self._format_bytes(size_bytes))
+            item.setForeground(QColor(51, 51, 51))
+            return
+
+        # 探测失败/未知：保持"探测中..."状态（用户可开始下载，实际大小会在下载时更新）
+        if not is_estimate:
+            return  # size <= 0 且非估算，保持原样
+
+        # 估算大小：码率 × 时长
+        # 查找任务的设备配置和通道号，尝试从已缓存的通道信息获取码率
+        task = self._dm.get_task(task_id)
+        if not task:
+            task = next((t for t in self._pending_tasks if t.task_id == task_id), None)
+        if not task:
+            return
+
+        device_key = task.device_id
+        ch_no = int(task.channel_id) if task.channel_id.isdigit() else 1
+        channels = self._device_channels.get(device_key, [])
+        ch_info = next((c for c in channels if int(c.get('no', c.get('id', 0))) == ch_no), None)
+
+        bitrate_kbps = 0
+        if ch_info and 'bitrate_kbps' in ch_info:
+            bitrate_kbps = ch_info['bitrate_kbps']
+
+        if bitrate_kbps <= 0:
+            # 无法估算，保持"探测中..."
+            return
+
+        duration_sec = (task.end_time - task.start_time).total_seconds()
+        if duration_sec <= 0:
+            return
+
+        estimated_bytes = int(bitrate_kbps * 1000 / 8 * duration_sec)
+        size_str = f"估算: {self._format_bytes(estimated_bytes)}"
+        item.setText(size_str)
+        item.setForeground(QColor(255, 152, 0))  # 橙色（与"探测中"灰色区分）
+
 
     def _on_progress_ui(self, task_id: str, progress: int):
         """下载进度更新"""
         row = self._find_row(task_id)
         if row >= 0:
             bar = self._table.cellWidget(row, 6)  # 第6列：下载进度
-            if bar:
-                bar.setValue(progress)
-                bar.setFormat(f"{progress}%")
-
-    def _on_transcode_progress_ui(self, task_id: str, progress: int):
-        """转码进度更新"""
-        row = self._find_row(task_id)
-        if row >= 0:
-            bar = self._table.cellWidget(row, 7)  # 第7列：转码进度
             if bar:
                 bar.setValue(progress)
                 bar.setFormat(f"{progress}%")
@@ -3163,15 +3722,24 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._cleanup_speed_tracking(task_id, success, file_path))
 
     def _cleanup_speed_tracking(self, task_id: str, success: bool, file_path: str):
-        """清理单个任务的速度跟踪数据"""
+        """清理单个任务的速度跟踪数据，并在主线程更新录像大小"""
         self._download_start_times.pop(task_id, None)
-        self._downloaded_bytes.pop(task_id, None)
+
         # 如果下载成功且有实际文件，更新实际大小和表格显示
-        if success and file_path and os.path.exists(file_path):
-            actual_size = os.path.getsize(file_path)
+        # 优先使用传入的file_path，如果不存在则从task对象获取
+        actual_path = file_path
+        if success and actual_path and not os.path.exists(actual_path):
+            # 传入的路径不存在，尝试从DM/task对象获取最新路径
+            task = self._dm.get_task(task_id)
+            if task and task.file_path and os.path.exists(task.file_path):
+                actual_path = task.file_path
+
+        if success and actual_path and os.path.exists(actual_path):
+            actual_size = os.path.getsize(actual_path)
             if actual_size > 0:
                 self._task_file_sizes[task_id] = actual_size
                 self._update_size_in_table(task_id, actual_size)
+
         # 检查是否所有任务都已完成
         if not self._download_start_times:
             if hasattr(self, '_speed_timer') and self._speed_timer.isActive():
@@ -3192,7 +3760,8 @@ class MainWindow(QMainWindow):
             if t.status == DownloadStatus.COMPLETED and t.file_path and os.path.exists(t.file_path):
                 completed_size += os.path.getsize(t.file_path)
         size_str = f" ({self._format_bytes(completed_size)})" if completed_size > 0 else ""
-        self._stats_label.setText(f"任务: {total} | 完成: {completed}{size_str} | 失败: {failed}")
+        # 更新下载任务信息面板中的统计标签
+        self._task_stats_label.setText(f"任务: {total} | 完成: {completed}{size_str} | 失败: {failed}")
 
     def _update_status_bar_from_tasks(self):
         """根据所有任务状态更新底部状态栏"""

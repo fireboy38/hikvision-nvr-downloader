@@ -279,7 +279,13 @@ class HCNetSDK:
         high   = device_info.byHighDChanNum & 0xFF
         ip_ch  = (high << 8) | (device_info.byIPChanNum & 0xFF)
         total  = analog + ip_ch
+        
+        # 调试信息：记录原始值
+        print(f"[SDK DEBUG] byChanNum={analog}, byHighDChanNum={device_info.byHighDChanNum}, byIPChanNum={device_info.byIPChanNum}")
+        print(f"[SDK DEBUG] high={high}, ip_ch={ip_ch}, total={total}")
+        
         if total <= 0 or total > 1000:
+            print(f"[SDK DEBUG] total={total} out of range, using default 128")
             total = 128
 
         dev = {

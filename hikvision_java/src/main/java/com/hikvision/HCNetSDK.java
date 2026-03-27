@@ -3973,6 +3973,25 @@ EMAIL参数结构
         public byte[] byRes = new byte[128];
     }
 
+    // SDK本地配置类型枚举
+    public static interface NET_SDK_LOCAL_CFG_TYPE {
+        int NET_SDK_LOCAL_CFG_TYPE_GENERAL = 0;  // 通用配置
+        int NET_SDK_LOCAL_CFG_TYPE_DOWNLOAD = 1; // 下载配置
+        int NET_SDK_LOCAL_CFG_TYPE_RECORD = 2;   // 录像配置
+    }
+
+    // 本地下载配置结构体
+    public static class NET_DVR_LOCAL_DOWNLOAD_CFG extends Structure
+    {
+        public byte byFileLength;      // 文件大小限制（单位：GB），0表示使用SDK默认值（通常为1GB）
+        public byte byRes[] = new byte[127];  // 保留字段
+
+        @Override
+        protected List<String> getFieldOrder() {
+            return Arrays.asList("byFileLength", "byRes");
+        }
+    }
+
     public static class BYTE_ARRAY extends Structure
     {
         public byte[] byValue;
@@ -4406,6 +4425,9 @@ EMAIL参数结构
     NativeLong NET_DVR_AdapterUpgrade(NativeLong lUserID,String sFileName);
     NativeLong NET_DVR_VcalibUpgrade(NativeLong lUserID,NativeLong lChannel,String sFileName);
     NativeLong NET_DVR_Upgrade_V40(NativeLong lUserID,ENUM_UPGRADE_TYPE dwUpgradeType,String sFileName,Pointer lpInBufer,int dwBufferSize);
+
+    // SDK本地配置接口
+    boolean NET_DVR_SetSDKLocalCfg(int dwType, NET_DVR_LOCAL_DOWNLOAD_CFG lpInBuff);
 
     //获取所有IP，用于支持多网卡接口
     boolean NET_DVR_GetLocalIP(byte sIP[], IntByReference pValidNum,ByteByReference pEnableBind);

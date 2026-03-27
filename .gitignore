@@ -78,3 +78,10 @@ monitor_*.py
 
 # Binary files
 bin/
+
+# Executable and config files
+*.exe
+*.dat
+*.zip
+DemoLocalCfg.json
+DeviceCfg.json

@@ -17,6 +17,7 @@ class DownloadStatus(Enum):
     """下载状态"""
     PENDING     = "pending"
     DOWNLOADING = "downloading"
+    MERGING     = "merging"    # 下载完成，合并中
     COMPLETED   = "completed"
     FAILED      = "failed"
     CANCELLED   = "cancelled"
@@ -118,7 +119,6 @@ class DownloadManager:
 
         # 外部回调
         self.on_progress:   Optional[Callable[[str, int], None]]           = None
-        self.on_transcode_progress: Optional[Callable[[str, int], None]]   = None  # 转码进度回调
         self.on_status:     Optional[Callable[[DownloadTask], None]]       = None
         self.on_completion: Optional[Callable[[DownloadTask], None]]       = None
         self.on_log:        Optional[Callable[[str], None]]                = None  # 日志回调
@@ -183,7 +183,7 @@ class DownloadManager:
     def cancel_all(self):
         with self._lock:
             for task in self.tasks.values():
-                if task.status in (DownloadStatus.PENDING, DownloadStatus.DOWNLOADING):
+                if task.status in (DownloadStatus.PENDING, DownloadStatus.DOWNLOADING, DownloadStatus.MERGING):
                     task.status = DownloadStatus.CANCELLED
 
     def clear_completed(self):
@@ -203,10 +203,6 @@ class DownloadManager:
 
     def set_progress_callback(self, cb: Callable):
         self.on_progress = cb
-
-    def set_transcode_progress_callback(self, cb: Callable):
-        """设置转码进度回调"""
-        self.on_transcode_progress = cb
 
     def set_status_callback(self, cb: Callable):
         self.on_status = cb
@@ -232,6 +228,10 @@ class DownloadManager:
             # 已经在运行，只需更新配置
             print(f"[DownloadManager] 下载管理器已在运行，更新配置: 总线程={self.max_concurrent}, 每设备={self.max_concurrent_per_device}")
             return
+        
+        # 重置Java下载器的停止事件（确保新任务可以运行）
+        from .java_downloader import reset_stop_event
+        reset_stop_event()
             
         self._running = True
         # 使用当前的max_concurrent值创建工作线程
@@ -254,14 +254,18 @@ class DownloadManager:
     def stop(self):
         self._running = False
         self.cancel_all()
+        
+        # 停止Java下载进程
+        from .java_downloader import stop_all_downloads, reset_stop_event
+        stop_all_downloads()
+        
         for w in self._workers:
             w.join(timeout=3)
         self._workers.clear()
         # 停止转码管理器
         if self._transcode_manager:
-            # 注意：不停止全局转码管理器，让它继续处理已提交的转码任务
-            # 如果需要强制停止，可以调用 stop_transcode_manager()
-            pass
+            self._transcode_manager.stop()
+            self._transcode_manager = None
 
     # -------- 工作线程 --------
 
@@ -427,32 +431,35 @@ class DownloadManager:
             elapsed = time.time() - t0
 
             if success:
-                if task.transcode_async and task.merge_mode == MERGE_MODE_STANDARD:
-                    # 异步转码模式：下载完成，转码在后台进行
-                    task.status = DownloadStatus.COMPLETED
+                # 判断是否需要合并（transcode_info 非空表示有分段需要合并）
+                if task.transcode_async and transcode_info:
+                    # 异步合并模式：下载完成，进入合并状态
+                    task.status = DownloadStatus.MERGING
                     task.progress = 100
                     task.error_message = ""
-                    success_msg = f"✓ 下载完成(转码中): ch{channel_no} ({task.channel_name}) - {msg}, 耗时:{elapsed:.1f}秒"
+                    success_msg = f"✓ 下载完成(合并中): ch{channel_no} ({task.channel_name}) - {msg}, 耗时:{elapsed:.1f}秒"
                     print(f"[JavaDownloader] {success_msg}")
                     _gui_log(success_msg)
+                    # 只更新状态，不触发完成回调（等合并完成后再触发）
+                    self._fire_status(task)
                 else:
-                    # 传统模式：下载和转码都已完成
+                    # 无需合并（单段或已完成合并）：直接完成
                     task.status = DownloadStatus.COMPLETED
                     task.progress = 100
                     task.error_message = ""
                     success_msg = f"✓ 下载完成: ch{channel_no} ({task.channel_name}) - {msg}, 耗时:{elapsed:.1f}秒"
                     print(f"[JavaDownloader] {success_msg}")
                     _gui_log(success_msg)
+                    self._fire_status(task)
+                    self._fire_completion(task)
             else:
                 task.status = DownloadStatus.FAILED
                 task.error_message = msg
                 fail_msg = f"✗ 下载失败: ch{channel_no} ({task.channel_name}) - {msg}"
                 print(f"[JavaDownloader] {fail_msg}")
                 _gui_log(fail_msg)
-
-            self._fire_status(task)
-            if self.on_completion:
-                self.on_completion(task.task_id, success, task.file_path, msg)
+                self._fire_status(task)
+                self._fire_completion(task)
 
         except Exception as e:
             task.status = DownloadStatus.FAILED
@@ -495,21 +502,39 @@ class DownloadManager:
                 self.on_log(msg)
             except Exception:
                 pass
-                
+
     def _on_transcode_status(self, task: TranscodeTask):
         """转码状态回调"""
-        # 转发转码进度到GUI
-        if self.on_transcode_progress:
-            try:
-                self.on_transcode_progress(task.task_id, task.progress)
-            except Exception:
-                pass
-        
+        pass
+
     def _on_transcode_completion(self, task: TranscodeTask):
         """转码完成回调"""
         status_str = "完成" if task.status == TranscodeStatus.COMPLETED else "失败"
         print(f"[DownloadManager] 转码任务 {status_str}: {task.channel_name}")
-        if self.on_log:
+        
+        # 更新对应的下载任务状态
+        download_task = self.tasks.get(task.task_id)
+        if download_task:
+            if task.status == TranscodeStatus.COMPLETED:
+                download_task.status = DownloadStatus.COMPLETED
+                download_task.file_path = task.save_path  # 更新最终文件路径
+                try:
+                    size_mb = os.path.getsize(task.save_path) / 1024 / 1024
+                    if self.on_log:
+                        self.on_log(f"✓ 合并完成: {task.channel_name} ({size_mb:.1f}MB)")
+                except Exception:
+                    if self.on_log:
+                        self.on_log(f"✓ 合并完成: {task.channel_name}")
+            else:
+                download_task.status = DownloadStatus.FAILED
+                download_task.error_message = task.error_message
+                if self.on_log:
+                    self.on_log(f"✗ 合并失败: {task.channel_name} - {task.error_message}")
+            # 通知UI更新状态
+            self._fire_status(download_task)
+            # 触发完成回调（此时状态为COMPLETED或FAILED）
+            self._fire_completion(download_task)
+        elif self.on_log:
             try:
                 if task.status == TranscodeStatus.COMPLETED:
                     size_mb = os.path.getsize(task.save_path) / 1024 / 1024

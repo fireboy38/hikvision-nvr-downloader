@@ -2,16 +2,13 @@
 海康威视NVR录像下载器
 
 核心逻辑：
-1. V40接口探测：先探测设备是否支持V40接口（无1GB限制）
-2. V40可用：直接下载整段，不分段，不合并
-3. V30回退：>55分钟则分段下载（规避SDK 1GB文件限制），FFmpeg合并
-4. 支持三种合并模式（仅V30分段时使用）：
+1. 使用V30接口下载录像
+2. 禁用自动分片，直接下载完整文件（接受SDK 1GB限制）
+3. 支持三种合并模式：
    - 极速模式：不转码，无faststart（最快）
    - 快速模式：不转码，直接concat
    - 标准模式：转码后合并（兼容性最好）
-5. 分段文件存放在临时目录，合并完成后自动清理
-6. 详细的调试日志：记录每段的信息、合并点位置等
-7. 用户只看到最终的完整文件（干净、无中间文件）
+4. 详细的调试日志：记录下载信息等
 """
 
 import os
@@ -23,6 +20,12 @@ from typing import Tuple, Optional, Callable, List, Dict, Any
 import time
 import math
 import logging
+import threading
+
+# 全局停止事件（用于跨线程控制Java子进程）
+_stop_event = threading.Event()
+_active_processes: Dict[str, subprocess.Popen] = {}  # task_id -> process
+_process_lock = threading.Lock()
 
 # Java配置
 JAVA_HOME     = r"C:\Program Files\Java\jdk-12.0.2"
@@ -33,9 +36,9 @@ MAIN_CLASS    = "com.hikvision.HikvisionDownloaderCLI"
 FFMPEG_PATH   = r"C:\tools\ffmpeg\bin\ffmpeg.exe"
 
 # SDK 单文件大小限制阈值（秒）
-# SDK V30 接口限制约 1GB；按 4Mbps 主码流估算约 34分钟 ≈ 2040秒；
-# 为安全起见每段限制为 55分钟 = 3300秒（接近但不超过1GB）
-SEGMENT_MAX_SECONDS = 55 * 60   # 每段最大时长（秒）
+# 已禁用自动分片功能，设置为24小时，所有录像直接下载
+# 注意：SDK V30 接口可能有 1GB 文件大小限制
+SEGMENT_MAX_SECONDS = 24 * 60 * 60   # 禁用分片（24小时）
 
 # 合并模式
 MERGE_MODE_ULTRA = "ultra"   # 极速模式：不转码，无faststart（最快）
@@ -91,128 +94,11 @@ def setup_download_logger(log_dir: str, task_id: str, channel_name: str = ""):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  内部：探测设备是否支持 V40 接口
+#  统一使用V30接口（分段下载绕过1GB限制）
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _detect_v40_support(
-    ip: str, port: int, username: str, password: str,
-    channel: int,
-    channel_name: str = "",
-    gui_log_callback: Optional[Callable[[str], None]] = None,
-) -> bool:
-    """
-    用一个30秒的小文件探测设备是否支持V40接口。
-    返回 True 表示V40可用。
-    """
-    def gui_log(msg: str):
-        if gui_log_callback:
-            try:
-                gui_log_callback(msg)
-            except Exception:
-                pass
-        print(f"[V40探测] {msg}")
 
-    # 取当前时间前2分钟的30秒作为探测段
-    now = datetime.now()
-    probe_start = now - timedelta(minutes=2)
-    probe_end = probe_start + timedelta(seconds=30)
 
-    # 临时文件路径
-    import tempfile
-    tmp_dir = tempfile.gettempdir()
-    probe_file = os.path.join(tmp_dir, f"_v40_probe_{channel}_{int(time.time())}.mp4")
-
-    try:
-        gui_log(f"正在探测 V40 接口支持（通道{channel}）...")
-
-        java_exe = os.path.join(JAVA_HOME, "bin", "java.exe")
-        args = [
-            java_exe,
-            f"-Djava.library.path={HCNET_SDK_PATH}",
-            "-Dfile.encoding=UTF-8",
-            "-Dsun.jnu.encoding=UTF-8",
-            "-cp",
-            f"{JAVA_LIB_DIR}\\jna.jar;{JAVA_LIB_DIR}\\examples.jar;{JAVA_BIN_DIR}",
-            MAIN_CLASS,
-            ip,
-            str(port),
-            username,
-            password,
-            str(channel),
-            probe_start.strftime("%Y-%m-%d %H:%M:%S"),
-            probe_end.strftime("%Y-%m-%d %H:%M:%S"),
-            probe_file,
-            f"V40探测",
-        ]
-
-        process = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-
-        output_lines = []
-        timeout_sec = 120  # 探测最多等2分钟
-        start_ts = time.time()
-
-        while True:
-            if time.time() - start_ts > timeout_sec:
-                process.terminate()
-                gui_log("探测超时")
-                return False
-
-            line = process.stdout.readline()
-            if not line:
-                break
-            line = line.strip()
-            if line:
-                output_lines.append(line)
-                gui_log(line)
-
-            # 关键判断行
-            if "[OK] V40 handle:" in line:
-                # V40成功！等进程完成
-                process.wait(timeout=60)
-                # 清理探测文件
-                try:
-                    if os.path.exists(probe_file):
-                        os.remove(probe_file)
-                except Exception:
-                    pass
-                return True
-
-            if "[OK] Using V30 handle:" in line:
-                # V40失败，回退到V30
-                process.wait(timeout=60)
-                try:
-                    if os.path.exists(probe_file):
-                        os.remove(probe_file)
-                except Exception:
-                    pass
-                return False
-
-            if "[FAIL]" in line:
-                process.wait(timeout=30)
-                return False
-
-            if process.poll() is not None:
-                break
-
-        process.wait(timeout=30)
-        return False
-
-    except Exception as e:
-        gui_log(f"探测异常: {e}")
-        return False
-    finally:
-        try:
-            if os.path.exists(probe_file):
-                os.remove(probe_file)
-        except Exception:
-            pass
 
 
 
@@ -287,6 +173,7 @@ def _run_java_segment_once(
     progress_callback: Optional[Callable[[int], None]] = None,
     gui_log = None,
     gui_log_callback: Optional[Callable[[str], None]] = None,
+    task_id: Optional[str] = None,  # 任务ID（用于进程管理）
 ) -> Tuple[bool, str]:
     """
     单次调用 Java CLI 下载一个时间段的录像（内部函数，被 _run_java_segment 调用）。
@@ -330,11 +217,27 @@ def _run_java_segment_once(
             encoding="utf-8",
             errors="replace",
         )
+        
+        # 注册进程（用于外部停止）
+        if task_id:
+            with _process_lock:
+                _active_processes[task_id] = process
 
         start_ts   = time.time()
         last_prog  = -1
 
         while True:
+            # 检查停止信号
+            if _stop_event.is_set():
+                process.terminate()
+                time.sleep(1)
+                if process.poll() is None:
+                    process.kill()
+                if task_id:
+                    with _process_lock:
+                        _active_processes.pop(task_id, None)
+                return False, "下载已取消"
+            
             line = process.stdout.readline()
             if not line:
                 break
@@ -368,10 +271,18 @@ def _run_java_segment_once(
                 time.sleep(1)
                 if process.poll() is None:
                     process.kill()
+                if task_id:
+                    with _process_lock:
+                        _active_processes.pop(task_id, None)
                 return False, f"下载超时 ({timeout}s)"
 
 
         process.wait(timeout=30)
+        
+        # 清理进程注册
+        if task_id:
+            with _process_lock:
+                _active_processes.pop(task_id, None)
 
         # 检查文件
         if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
@@ -391,8 +302,14 @@ def _run_java_segment_once(
 
     except subprocess.TimeoutExpired:
         process.kill()
+        if task_id:
+            with _process_lock:
+                _active_processes.pop(task_id, None)
         return False, "下载超时"
     except Exception as e:
+        if task_id:
+            with _process_lock:
+                _active_processes.pop(task_id, None)
         return False, f"下载异常: {e}"
 
 
@@ -699,6 +616,43 @@ def _ffmpeg_concat_standard(segments: List[str], output: str, merge_points: List
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  停止控制
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stop_all_downloads():
+    """停止所有正在运行的Java下载进程"""
+    global _stop_event
+    _stop_event.set()
+    
+    # 终止所有活跃进程
+    with _process_lock:
+        for task_id, proc in list(_active_processes.items()):
+            try:
+                proc.terminate()
+                time.sleep(0.5)
+                if proc.poll() is None:
+                    proc.kill()
+                print(f"[JavaDownloader] 已终止进程: {task_id}")
+            except Exception as e:
+                print(f"[JavaDownloader] 终止进程失败: {task_id}, {e}")
+        _active_processes.clear()
+    
+    print("[JavaDownloader] 所有下载已停止")
+
+
+def reset_stop_event():
+    """重置停止事件（用于开始新的下载任务前）"""
+    global _stop_event
+    _stop_event = threading.Event()
+    print("[JavaDownloader] 停止事件已重置")
+
+
+def is_stopped() -> bool:
+    """检查是否收到停止信号"""
+    return _stop_event.is_set()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  公共接口
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -780,57 +734,9 @@ def download_with_java(
     if enable_debug_log:
         logger.info(f"[下载] 录像时长: {duration_sec/60:.1f} 分钟 ({duration_sec:.0f} 秒)")
 
-    # ── 探测V40接口 ────────────────────────────────────────────────────────
-    v40_supported = _detect_v40_support(
-        ip, port, username, password, channel, channel_name, gui_log_callback
-    )
-
-    if v40_supported:
-        gui_log(f"[V40] ✅ 设备支持V40接口，直接下载（无1GB限制，无需分段）")
-        logger.info(f"[V40] 设备支持V40接口，直接下载整段")
-    else:
-        gui_log(f"[V30] ⚠️ 设备不支持V40，使用V30接口（有1GB限制，长录像需分段）")
-        logger.info(f"[V30] 设备不支持V40，使用V30分段策略")
-        mode_text = {'ultra': '极速(无faststart)', 'fast': '快速(不转码)', 'standard': '标准(转码)'}.get(merge_mode, '快速')
-        gui_log(f"合并模式: {mode_text}")
-
-    # ── V40: 直接下载整段，不分段 ───────────────────────────────────────────
-    if v40_supported:
-        ok, msg = _run_java_segment(
-            ip, port, username, password, channel,
-            start_time, end_time, save_path, channel_name,
-            progress_callback=progress_callback,
-            gui_log_callback=gui_log_callback,
-        )
-
-        if not ok:
-            logger.error(f"[V40下载] 失败: {msg}")
-            return False, msg
-
-        # 根据参数决定是否转码
-        if skip_transcode:
-            size_mb = os.path.getsize(save_path) / 1024 / 1024
-            logger.info(f"[V40完成] 跳过转码，使用原始文件: {size_mb:.1f}MB")
-            gui_log(f"[OK] V40下载完成: {size_mb:.1f}MB (原始格式)")
-            return True, f"下载成功(V40), 大小: {size_mb:.1f}MB"
-        else:
-            logger.info(f"[转码] 开始转换为标准MP4...")
-            gui_log(f"[CONV] 转换为标准MP4...")
-            conv_path = save_path.replace(".mp4", "_conv.mp4")
-            ok2, err = _ffmpeg_to_mp4(save_path, conv_path)
-
-            if ok2:
-                os.remove(save_path)
-                os.rename(conv_path, save_path)
-                size_mb = os.path.getsize(save_path) / 1024 / 1024
-                logger.info(f"[V40完成] 成功: {size_mb:.1f}MB")
-                gui_log(f"[OK] V40下载完成: {size_mb:.1f}MB (标准MP4)")
-                return True, f"下载成功(V40), 大小: {size_mb:.1f}MB"
-            else:
-                logger.warning(f"[V40完成] 转换失败，保留原始文件: {err}")
-                size_mb = os.path.getsize(save_path) / 1024 / 1024
-                gui_log(f"[WARN] 转换失败，保留原始文件: {err}")
-                return True, f"下载成功(V40, MPEG格式): {size_mb:.1f}MB"
+    # ── 统一使用V30接口（分段下载绕过1GB限制）────────────────────────────
+    mode_text = {'ultra': '极速(无faststart)', 'fast': '快速(不转码)', 'standard': '标准(转码)'}.get(merge_mode, '快速')
+    gui_log(f"合并模式: {mode_text}")
 
     # ── V30: 短录像直接下载 ────────────────────────────────────────────────
     if duration_sec <= SEGMENT_MAX_SECONDS:
@@ -1203,50 +1109,10 @@ def download_only(
     
     duration_sec = int((end_time - start_time).total_seconds())
     gui_log(f"[DOWNLOAD-ONLY] {channel_info} 开始下载 {duration_sec/60:.1f}分钟")
-    
-    # ── 探测V40接口 ──
-    v40_supported = _detect_v40_support(ip, port, username, password, channel, channel_name, gui_log_callback)
-    
-    if v40_supported:
-        gui_log(f"[V40] ✅ 设备支持V40，直接下载（不分段）")
-        logger.info(f"[download_only] V40可用，直接下载整段")
-    
-    # ── V40: 直接下载，不分段 ──
-    if v40_supported:
-        seg_raw_path = os.path.join(temp_dir, f"_seg_001_raw_ch{channel}_{int(time.time()*1000)}.mp4")
-        
-        ok, msg = _run_java_segment(
-            ip, port, username, password, channel,
-            start_time, end_time, seg_raw_path, channel_name,
-            progress_callback=progress_callback,
-            gui_log_callback=gui_log_callback,
-        )
-        
-        if not ok:
-            logger.error(f"[download_only V40] 失败: {msg}")
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass
-            return False, msg, None
-        
-        size_mb = os.path.getsize(seg_raw_path) / 1024 / 1024
-        gui_log(f"[DOWNLOAD-OK] {channel_info} V40下载完成: {size_mb:.1f}MB")
-        
-        transcode_info = {
-            'task_id': str(uuid.uuid4()),
-            'channel': channel,
-            'channel_name': channel_name,
-            'device_id': device_id,
-            'seg_files': [seg_raw_path],
-            'seg_raw_files': [seg_raw_path],
-            'temp_dir': temp_dir,
-            'merge_points': [(seg_raw_path, f"{start_time.strftime('%H:%M:%S')} ~ {end_time.strftime('%H:%M:%S')}")],
-            'save_path': save_path,
-            'v40': True,  # 标记为V40下载
-        }
-        return True, f"V40下载完成: {size_mb:.1f}MB", transcode_info
-    
+
+    # ── 统一使用V30接口 ──
+    # V30分段下载是最可靠的方案，绕过SDK的1GB文件大小限制
+
     # ── V30: 短录像直接下载 ──
     if duration_sec <= SEGMENT_MAX_SECONDS:
         seg_raw_path = os.path.join(temp_dir, f"_seg_001_raw_ch{channel}_{int(time.time()*1000)}.mp4")
@@ -1282,10 +1148,8 @@ def download_only(
             'save_path': save_path,
         }
         return True, f"下载完成: {size_mb:.1f}MB", transcode_info
-    
+
     # ── V30: 长录像分段下载 ──
-    gui_log(f"[V30] 设备不支持V40，分段下载")
-    
     duration_sec_int = int(duration_sec)
     num_segs = math.ceil(duration_sec_int / SEGMENT_MAX_SECONDS)
     gui_log(f"[SEG] {channel_info} 分段下载: {num_segs}段")
