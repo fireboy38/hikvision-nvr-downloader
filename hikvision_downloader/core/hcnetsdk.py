@@ -14,10 +14,15 @@ from datetime import datetime
 # SDK路径配置 - 自动检测exe所在目录或开发环境
 def _get_sdk_path():
     """获取SDK DLL所在目录"""
-    # 1. 优先检查exe所在目录（打包后的运行环境）
+    # 1. 优先检查PyInstaller打包后的_internal目录
     if getattr(sys, 'frozen', False):
-        # PyInstaller打包后
+        # PyInstaller目录模式：DLL在_internal子目录
         exe_dir = os.path.dirname(sys.executable)
+        internal_dir = os.path.join(exe_dir, "_internal")
+        if os.path.exists(os.path.join(internal_dir, "HCNetSDK.dll")):
+            print(f"[SDK] 使用PyInstaller _internal目录: {internal_dir}")
+            return internal_dir
+        # PyInstaller单文件模式：解压到临时目录
         if os.path.exists(os.path.join(exe_dir, "HCNetSDK.dll")):
             print(f"[SDK] 使用exe目录: {exe_dir}")
             return exe_dir
@@ -34,9 +39,9 @@ def _get_sdk_path():
         print(f"[SDK] 使用开发环境路径: {dev_path}")
         return dev_path
     
-    # 4. 返回exe目录作为默认（会在后续报错）
+    # 4. 返回_internal目录作为默认（会在后续报错）
     if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
+        return os.path.join(os.path.dirname(sys.executable), "_internal")
     return dev_path
 
 SDK_PATH = _get_sdk_path()

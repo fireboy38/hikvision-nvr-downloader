@@ -980,9 +980,9 @@ class MainWindow(QMainWindow):
         screen = QApplication.primaryScreen()
         if screen:
             screen_geometry = screen.availableGeometry()
-            # 窗口大小为屏幕可用区域的70%，最大不超过1400x900
-            width = min(int(screen_geometry.width() * 0.70), 1400)
-            height = min(int(screen_geometry.height() * 0.75), 900)
+            # 窗口大小为屏幕可用区域的70%，放大1.25倍，最大不超过1750x1125
+            width = min(int(screen_geometry.width() * 0.70 * 1.25), 1750)
+            height = min(int(screen_geometry.height() * 0.75 * 1.25), 1125)
             self.resize(width, height)
             # 居中显示
             self.move(
@@ -991,7 +991,7 @@ class MainWindow(QMainWindow):
             )
         
         # 最小尺寸（确保功能可用）
-        self.setMinimumSize(900, 650)
+        self.setMinimumSize(1125, 812)
 
         self.devices:      List[Dict] = []
         self._device_channels: Dict[str, List[Dict]] = {}  # {device_key: [channels]}
@@ -1204,7 +1204,7 @@ class MainWindow(QMainWindow):
             hb.addWidget(b)
         dl.addLayout(hb)
         dg.setLayout(dl)
-        vbox.addWidget(dg, 1)  # 设备管理窗口垂直比例小一些
+        vbox.addWidget(dg, 1)  # 设备管理窗口垂直比例缩小
 
         # 通道选择
         cg = QGroupBox("通道选择")
@@ -1237,7 +1237,7 @@ class MainWindow(QMainWindow):
         cl.addWidget(self._channel_count_label)
 
         cg.setLayout(cl)
-        vbox.addWidget(cg, 7)  # 通道选择窗口垂直比例更大（显示更多通道）
+        vbox.addWidget(cg, 10)  # 通道选择窗口垂直比例增大（显示更多通道）
 
         # 在时间选择框前添加垂直间距
         vbox.addSpacing(30)
