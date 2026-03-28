@@ -26,7 +26,7 @@ class ConnectWorker(QThread):
                 cfg.get('username', 'admin'), cfg.get('password', '')
             )
             if not ok:
-                sdk.cleanup()
+                sdk.logout_only()  # 只登出，不清理SDK
                 self.result_ready.emit(False, f"登录失败: {msg}", {}, [])
                 return
 
@@ -39,7 +39,7 @@ class ConnectWorker(QThread):
                 password=cfg.get('password', ''),
             )
 
-            sdk.cleanup()
+            sdk.logout_only()  # 只登出，不清理SDK
             self.result_ready.emit(True, "连接成功", dev, channels)
 
         except Exception as e:

@@ -936,7 +936,7 @@ class ConnectWorker(QThread):
                 cfg.get('username', 'admin'), cfg.get('password', '')
             )
             if not ok:
-                sdk.cleanup()
+                sdk.logout_only()  # 只登出，不清理SDK
                 self.result_ready.emit(False, f"登录失败: {msg}", {}, [])
                 return
 
@@ -950,7 +950,7 @@ class ConnectWorker(QThread):
                 password   = cfg.get('password', ''),
             )
 
-            sdk.cleanup()
+            sdk.logout_only()  # 只登出，不清理SDK
             self.result_ready.emit(True, "连接成功", dev, channels)
 
         except Exception as e:
@@ -1638,7 +1638,7 @@ class MainWindow(QMainWindow):
             )
 
             if not ok:
-                sdk.cleanup()
+                sdk.logout_only()  # 只登出，不清理SDK
                 QTimer.singleShot(0, lambda: QMessageBox.warning(
                     self, "查询失败", f"{cfg['name']}: {msg}"
                 ))
@@ -1732,7 +1732,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 log(f"  ❌ 获取设备信息失败: {e}")
 
-            sdk.cleanup()
+            sdk.logout_only()  # 只登出，不清理SDK
 
             # 构建查询结果
             result_text = f"""📋 设备查询结果: {cfg['name']}
@@ -2150,7 +2150,7 @@ class MainWindow(QMainWindow):
                     cfg.get('username', 'admin'), cfg.get('password', '')
                 )
                 if not ok:
-                    sdk.cleanup()
+                    sdk.logout_only()  # 只登出，不清理SDK
                     return cfg, False, f"登录失败: {msg}", {}, []
 
                 channels = sdk.get_channels_with_names(
@@ -2161,7 +2161,7 @@ class MainWindow(QMainWindow):
                     username=cfg.get('username', 'admin'),
                     password=cfg.get('password', ''),
                 )
-                sdk.cleanup()
+                sdk.logout_only()  # 只登出，不清理SDK
                 return cfg, True, "连接成功", dev, channels
             except Exception as e:
                 return cfg, False, f"异常: {e}", {}, []

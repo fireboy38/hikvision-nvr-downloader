@@ -168,7 +168,6 @@ ERROR_CODES = {
 # ==================== SDK封装类 ====================
 
 # SDK全局状态
-_sdk_instance = None
 _sdk_init_called = False
 _sdk_lock = threading.Lock()
 
@@ -176,27 +175,14 @@ class HCNetSDK:
     """海康SDK封装类（线程安全）"""
 
     def __init__(self):
-        global _sdk_instance
-        with _sdk_lock:
-            if _sdk_instance is None:
-                _sdk_instance = self
-                self.sdk = None
-                self.user_id = -1
-                self._lock = threading.Lock()
-                self._active_downloads: Dict[int, bool] = {}   # handle -> should_stop
-                self._load_sdk()
-            else:
-                # 复用现有实例
-                self.sdk = _sdk_instance.sdk
-                self.user_id = -1
-                self._lock = threading.Lock()
-                self._active_downloads: Dict[int, bool] = {}
-                self._is_shared_instance = True
+        self.sdk = None
+        self.user_id = -1
+        self._lock = threading.Lock()
+        self._active_downloads: Dict[int, bool] = {}   # handle -> should_stop
+        self._load_sdk()
     
     def __del__(self):
-        if hasattr(self, '_is_shared_instance'):
-            # 共享实例，不清理SDK
-            return
+        pass
 
     # ------------------------------------------------------------------ #
     #  加载与初始化
@@ -212,7 +198,7 @@ class HCNetSDK:
         old_cwd = os.getcwd()
         
         try:
-            # 必须先切换工作目录到SDK所在目录（让DLL能找到依赖）
+            # 必须先切换工作目录到SDK所在目录（让DLL都能找到依赖）
             os.chdir(SDK_PATH)
             self.sdk = ctypes.CDLL(sdk_dll)
             print(f"[SDK] 已加载: {sdk_dll}")
@@ -323,24 +309,29 @@ class HCNetSDK:
             print(f"[SDK] 连接参数设置完成")
             return True
 
-    def cleanup(self):
-        """清理SDK"""
-        global _sdk_instance
+    def cleanup(self, force=False):
+        """清理SDK
+        Args:
+            force: 强制清理，即使还有其他连接
+        """
+        global _sdk_init_called
         
         try:
             if self.user_id >= 0:
                 self.logout()
             
-            # 只有主实例才清理SDK
-            if not hasattr(self, '_is_shared_instance') and _sdk_instance is self:
-                self.sdk.NET_DVR_Cleanup()
-                _sdk_instance = None
-                _sdk_init_called = False
-                print("[SDK] 已清理")
-            elif hasattr(self, '_is_shared_instance'):
-                print("[SDK] 共享实例，仅登出不清理SDK")
+            # 只有在程序退出时才真正清理SDK
+            # 在连接线程中不要调用cleanup()，用logout_only()代替
+            if force:
+                with _sdk_lock:
+                    if _sdk_init_called:
+                        self.sdk.NET_DVR_Cleanup()
+                        _sdk_init_called = False
+                        print("[SDK] 已强制清理")
+                    else:
+                        print("[SDK] SDK未初始化或已清理")
             else:
-                print("[SDK] 非主实例，仅登出不清理SDK")
+                print("[SDK] 非强制模式，仅登出不清理SDK")
         except Exception as e:
             print(f"[SDK] 清理异常: {e}")
 
@@ -416,6 +407,10 @@ class HCNetSDK:
         self.user_id = -1
         print("[SDK] 已登出")
         return ok
+    
+    def logout_only(self) -> bool:
+        """只登出，不清理SDK（用于连接线程）"""
+        return self.logout()
 
     # ------------------------------------------------------------------ #
     #  错误信息
@@ -956,7 +951,7 @@ if __name__ == "__main__":
     ok, msg, dev = sdk.login("10.4.130.245", 8000, "admin", "a1111111")
     if not ok:
         print(f"登录失败: {msg}")
-        sdk.cleanup()
+        sdk.logout_only()  # 只登出，不清理SDK
         sys.exit(1)
 
     print(f"设备信息: {dev}")
@@ -994,4 +989,4 @@ if __name__ == "__main__":
     if success:
         print(f"文件: {save}")
 
-    sdk.cleanup()
+    sdk.logout_only()  # 只登出，不清理SDK
