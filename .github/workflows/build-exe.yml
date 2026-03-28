@@ -31,9 +31,19 @@ jobs:
         pip install pyinstaller
         pip install -r requirements.txt
         
-    - name: Build EXE with PyInstaller
+    - name: Download Hikvision SDK
       run: |
-        pyinstaller --noconfirm --onefile --windowed `
+        # 创建SDK目录
+        New-Item -ItemType Directory -Force -Path "sdk"
+        
+        # 下载SDK（使用公开的SDK下载链接）
+        # 注意：海康SDK需要从官网下载，这里使用备用方案
+        Write-Host "SDK需要手动配置，当前构建不包含SDK DLL"
+        Write-Host "如需完整版，请在本地构建或联系开发者获取SDK"
+        
+    - name: Build EXE with PyInstaller (without SDK)
+      run: |
+        python -m PyInstaller --noconfirm --onefile --windowed `
           --name "四川新数录像批量下载器" `
           --paths "hikvision_downloader" `
           --hidden-import PyQt5 `
@@ -75,27 +85,48 @@ jobs:
         name: 四川新数录像批量下载器-Windows
         path: dist/四川新数录像批量下载器.exe
         
-    - name: Get current date
-      id: date
-      run: echo "date=$(date +'%Y-%m-%d')" >> $env:GITHUB_OUTPUT
+    - name: Get version info
+      id: version
+      run: |
+        $date = Get-Date -Format "yyyy-MM-dd"
+        $shortSha = "${{ github.sha }}".Substring(0, 7)
+        echo "date=$date" >> $env:GITHUB_OUTPUT
+        echo "sha=$shortSha" >> $env:GITHUB_OUTPUT
         
     - name: Create/Update Nightly Release
       uses: softprops/action-gh-release@v1
+      if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')
       with:
         tag_name: nightly
-        name: Nightly Build (${{ steps.date.outputs.date }})
+        name: Nightly Build (${{ steps.version.outputs.date }})
         body: |
-          自动构建的最新版本
+          ## 自动构建版本
           
-          构建时间: ${{ steps.date.outputs.date }}
-          提交: ${{ github.sha }}
+          **构建时间**: ${{ steps.version.outputs.date }}
+          **提交**: ${{ steps.version.outputs.sha }}
           
-          ## 使用方法
-          1. 下载 `四川新数录像批量下载器.exe`
-          2. 双击运行即可
+          ### 使用方法
+          1. 下载下方的 `四川新数录像批量下载器.exe`
+          2. **重要**: 需要将海康SDK DLL文件放在exe同目录下才能使用SDK功能
+          3. ISAPI模式可直接使用，无需SDK
           
-          ## 注意
-          这是自动构建版本，可能包含最新但未经充分测试的功能。
+          ### 功能说明
+          - **ISAPI模式**: 纯HTTP下载，无需SDK，推荐使用
+          - **SDK模式**: 需要海康SDK DLL文件
+          
+          ### DLL文件（SDK模式需要）
+          将以下DLL放在exe同目录：
+          - HCNetSDK.dll
+          - HCCore.dll
+          - hpr.dll
+          - PlayCtrl.dll
+          - StreamTransClient.dll
+          - SuperRender.dll
+          - AudioRender.dll
+          - GdiPlus.dll
+          - HCNetSDKCom文件夹
+          
+          > **注意**: 这是自动构建版本，可能包含最新但未经充分测试的功能。
         files: dist/四川新数录像批量下载器.exe
         draft: false
         prerelease: true
@@ -106,6 +137,21 @@ jobs:
       if: startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v1
       with:
+        name: 四川新数录像批量下载器 ${{ github.ref_name }}
+        body: |
+          ## 四川新数录像批量下载器 ${{ github.ref_name }}
+          
+          ### 使用方法
+          1. 下载 `四川新数录像批量下载器.exe`
+          2. **重要**: 需要将海康SDK DLL文件放在exe同目录下才能使用SDK功能
+          3. ISAPI模式可直接使用，无需SDK
+          
+          ### 功能说明
+          - **ISAPI模式**: 纯HTTP下载，无需SDK，推荐使用
+          - **SDK模式**: 需要海康SDK DLL文件
+          
+          ### 更新日志
+          请查看 [commits](https://github.com/${{ github.repository }}/commits/main) 了解详情。
         files: dist/四川新数录像批量下载器.exe
         draft: false
         prerelease: false
