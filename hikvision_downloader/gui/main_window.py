@@ -975,9 +975,23 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("四川新数录像批量下载器")
         
-        # 设置合理的窗口尺寸（不设置过大，避免高DPI下占满屏幕）
-        self.setMinimumSize(1100, 750)  # 最小尺寸
-        self.resize(1280, 850)  # 默认尺寸（逻辑像素）
+        # 根据屏幕尺寸设置窗口大小（百分比模式）
+        from PyQt5.QtWidgets import QApplication, QDesktopWidget
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geometry = screen.availableGeometry()
+            # 窗口大小为屏幕可用区域的70%，最大不超过1400x900
+            width = min(int(screen_geometry.width() * 0.70), 1400)
+            height = min(int(screen_geometry.height() * 0.75), 900)
+            self.resize(width, height)
+            # 居中显示
+            self.move(
+                screen_geometry.x() + (screen_geometry.width() - width) // 2,
+                screen_geometry.y() + (screen_geometry.height() - height) // 2
+            )
+        
+        # 最小尺寸（确保功能可用）
+        self.setMinimumSize(900, 650)
 
         self.devices:      List[Dict] = []
         self._device_channels: Dict[str, List[Dict]] = {}  # {device_key: [channels]}
