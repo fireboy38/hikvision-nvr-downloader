@@ -1,13 +1,21 @@
 name: Build Windows EXE
 
 on:
+  # 只在手动触发或创建tag时编译
+  workflow_dispatch:  # 手动触发
+    inputs:
+      release_type:
+        description: '发布类型'
+        required: true
+        default: 'nightly'
+        type: choice
+        options:
+          - nightly
+          - stable
   push:
-    branches: [ main, master ]
     tags:
-      - 'v*'
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:
+      - 'v*'  # 创建v开头的tag时触发（如v1.0.0）
+  # 移除 push 和 pull_request 自动触发
 
 permissions:
   contents: write
@@ -31,17 +39,7 @@ jobs:
         pip install pyinstaller
         pip install -r requirements.txt
         
-    - name: Download Hikvision SDK
-      run: |
-        # 创建SDK目录
-        New-Item -ItemType Directory -Force -Path "sdk"
-        
-        # 下载SDK（使用公开的SDK下载链接）
-        # 注意：海康SDK需要从官网下载，这里使用备用方案
-        Write-Host "SDK需要手动配置，当前构建不包含SDK DLL"
-        Write-Host "如需完整版，请在本地构建或联系开发者获取SDK"
-        
-    - name: Build EXE with PyInstaller (without SDK)
+    - name: Build EXE with PyInstaller
       run: |
         python -m PyInstaller --noconfirm --onefile --windowed `
           --name "四川新数录像批量下载器" `
@@ -93,9 +91,9 @@ jobs:
         echo "date=$date" >> $env:GITHUB_OUTPUT
         echo "sha=$shortSha" >> $env:GITHUB_OUTPUT
         
-    - name: Create/Update Nightly Release
+    - name: Create Nightly Release
+      if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'nightly'
       uses: softprops/action-gh-release@v1
-      if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')
       with:
         tag_name: nightly
         name: Nightly Build (${{ steps.version.outputs.date }})
@@ -133,13 +131,16 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         
-    - name: Create Stable Release (on tag)
-      if: startsWith(github.ref, 'refs/tags/v')
+    - name: Create Stable Release (on tag or manual stable)
+      if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'stable')
       uses: softprops/action-gh-release@v1
       with:
-        name: 四川新数录像批量下载器 ${{ github.ref_name }}
+        name: 四川新数录像批量下载器 ${{ github.ref_name || steps.version.outputs.date }}
         body: |
-          ## 四川新数录像批量下载器 ${{ github.ref_name }}
+          ## 四川新数录像批量下载器
+          
+          **构建时间**: ${{ steps.version.outputs.date }}
+          **版本**: ${{ github.ref_name || 'Stable Build' }}
           
           ### 使用方法
           1. 下载 `四川新数录像批量下载器.exe`
