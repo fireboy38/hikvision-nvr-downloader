@@ -91,6 +91,13 @@ jobs:
         echo "date=$date" >> $env:GITHUB_OUTPUT
         echo "sha=$shortSha" >> $env:GITHUB_OUTPUT
         
+    - name: Delete old nightly release
+      if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'nightly'
+      run: |
+        gh release delete nightly --yes --cleanup-tag=false || true
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
     - name: Create Nightly Release
       if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'nightly'
       uses: softprops/action-gh-release@v1
