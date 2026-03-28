@@ -17,9 +17,11 @@ from utils.logger import logger
 def main():
     """主函数"""
     # 高DPI缩放设置（必须在创建QApplication之前）
+    # 关键：不设置QT_SCALE_FACTOR，让Qt自动检测系统缩放比例
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
-    os.environ["QT_SCALE_FACTOR"] = "1"
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+    # 禁用Qt的缩放因子覆盖，使用系统设置
+    # os.environ["QT_SCALE_FACTOR"] = "1"  # 注释掉，避免强制1:1缩放
     
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)

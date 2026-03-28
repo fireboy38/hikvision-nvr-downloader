@@ -974,7 +974,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("四川新数录像批量下载器")
-        self.setMinimumSize(1280, 850)
+        
+        # 设置合理的窗口尺寸（不设置过大，避免高DPI下占满屏幕）
+        self.setMinimumSize(1100, 750)  # 最小尺寸
+        self.resize(1280, 850)  # 默认尺寸（逻辑像素）
 
         self.devices:      List[Dict] = []
         self._device_channels: Dict[str, List[Dict]] = {}  # {device_key: [channels]}
