@@ -16,14 +16,13 @@ from utils.logger import logger
 
 def main():
     """主函数"""
-    # 高DPI缩放设置（必须在创建QApplication之前）
-    # 关键：不设置QT_SCALE_FACTOR，让Qt自动检测系统缩放比例
-    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
-    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
-    # 禁用Qt的缩放因子覆盖，使用系统设置
-    # os.environ["QT_SCALE_FACTOR"] = "1"  # 注释掉，避免强制1:1缩放
+    # 高DPI设置：禁用Qt自动缩放，使用系统DPI
+    # 这样UI在所有缩放比例下保持一致的物理大小
+    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"  # 禁用自动缩放
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"  # 禁用自动检测
+    os.environ["QT_SCALE_FACTOR"] = "1"  # 固定1:1缩放
     
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    # 但启用高DPI字体渲染
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     
     # 创建应用

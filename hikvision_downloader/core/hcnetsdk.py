@@ -11,8 +11,35 @@ from ctypes import *
 from typing import List, Dict, Any, Optional, Tuple, Callable
 from datetime import datetime
 
-# SDK路径配置
-SDK_PATH = r"C:\Users\Administrator\CH-HCNetSDKV6.1.6.45_build20210302_win64_20210508181836\CH-HCNetSDKV6.1.6.45_build20210302_win64\库文件"
+# SDK路径配置 - 自动检测exe所在目录或开发环境
+def _get_sdk_path():
+    """获取SDK DLL所在目录"""
+    # 1. 优先检查exe所在目录（打包后的运行环境）
+    if getattr(sys, 'frozen', False):
+        # PyInstaller打包后
+        exe_dir = os.path.dirname(sys.executable)
+        if os.path.exists(os.path.join(exe_dir, "HCNetSDK.dll")):
+            print(f"[SDK] 使用exe目录: {exe_dir}")
+            return exe_dir
+    
+    # 2. 检查当前工作目录
+    cwd = os.getcwd()
+    if os.path.exists(os.path.join(cwd, "HCNetSDK.dll")):
+        print(f"[SDK] 使用当前目录: {cwd}")
+        return cwd
+    
+    # 3. 开发环境：使用SDK安装路径
+    dev_path = r"C:\Users\Administrator\CH-HCNetSDKV6.1.6.45_build20210302_win64_20210508181836\CH-HCNetSDKV6.1.6.45_build20210302_win64\库文件"
+    if os.path.exists(os.path.join(dev_path, "HCNetSDK.dll")):
+        print(f"[SDK] 使用开发环境路径: {dev_path}")
+        return dev_path
+    
+    # 4. 返回exe目录作为默认（会在后续报错）
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return dev_path
+
+SDK_PATH = _get_sdk_path()
 SDK_COM_PATH = os.path.join(SDK_PATH, "HCNetSDKCom")
 
 # ==================== 常量定义 ====================
