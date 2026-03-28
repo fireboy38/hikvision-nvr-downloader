@@ -279,11 +279,20 @@ class HCNetSDK:
 
     def init(self) -> bool:
         """初始化SDK"""
+        # 必须先初始化SDK，然后才能调用其他函数
+        ok = self.sdk.NET_DVR_Init()
+        if not ok:
+            err = self.sdk.NET_DVR_GetLastError()
+            print(f"[SDK] 初始化失败: 错误码 {err}")
+            return False
+        
+        print(f"[SDK] 初始化成功")
+        
+        # 初始化成功后设置连接参数
         self.sdk.NET_DVR_SetConnectTime(3000, 3)
         self.sdk.NET_DVR_SetReconnect(10000, True)
-        ok = self.sdk.NET_DVR_Init()
-        print(f"[SDK] 初始化: {'成功' if ok else '失败'}")
-        return ok
+        print(f"[SDK] 连接参数设置完成")
+        return True
 
     def cleanup(self):
         """清理SDK"""
