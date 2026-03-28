@@ -187,11 +187,20 @@ class HCNetSDK:
         if not os.path.exists(sdk_dll):
             raise FileNotFoundError(f"SDK DLL不存在: {sdk_dll}")
 
-        # 必须先切换工作目录
-        os.chdir(SDK_PATH)
-        self.sdk = ctypes.CDLL(sdk_dll)
-        print(f"[SDK] 已加载: {sdk_dll}")
-        self._setup_functions()
+        # 保存当前工作目录
+        old_cwd = os.getcwd()
+        
+        try:
+            # 必须先切换工作目录到SDK所在目录（让DLL能找到依赖）
+            os.chdir(SDK_PATH)
+            self.sdk = ctypes.CDLL(sdk_dll)
+            print(f"[SDK] 已加载: {sdk_dll}")
+            print(f"[SDK] 工作目录: {SDK_PATH}")
+            self._setup_functions()
+        finally:
+            # 恢复工作目录
+            os.chdir(old_cwd)
+            print(f"[SDK] 恢复工作目录: {old_cwd}")
 
     def _setup_functions(self):
         """声明所有SDK函数原型（避免ctypes默认int返回值截断）"""
