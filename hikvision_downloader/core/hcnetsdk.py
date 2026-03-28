@@ -167,15 +167,36 @@ ERROR_CODES = {
 
 # ==================== SDK封装类 ====================
 
+# SDK全局状态
+_sdk_instance = None
+_sdk_init_called = False
+_sdk_lock = threading.Lock()
+
 class HCNetSDK:
     """海康SDK封装类（线程安全）"""
 
     def __init__(self):
-        self.sdk = None
-        self.user_id = -1
-        self._lock = threading.Lock()
-        self._active_downloads: Dict[int, bool] = {}   # handle -> should_stop
-        self._load_sdk()
+        global _sdk_instance
+        with _sdk_lock:
+            if _sdk_instance is None:
+                _sdk_instance = self
+                self.sdk = None
+                self.user_id = -1
+                self._lock = threading.Lock()
+                self._active_downloads: Dict[int, bool] = {}   # handle -> should_stop
+                self._load_sdk()
+            else:
+                # 复用现有实例
+                self.sdk = _sdk_instance.sdk
+                self.user_id = -1
+                self._lock = threading.Lock()
+                self._active_downloads: Dict[int, bool] = {}
+                self._is_shared_instance = True
+    
+    def __del__(self):
+        if hasattr(self, '_is_shared_instance'):
+            # 共享实例，不清理SDK
+            return
 
     # ------------------------------------------------------------------ #
     #  加载与初始化
@@ -279,28 +300,47 @@ class HCNetSDK:
 
     def init(self) -> bool:
         """初始化SDK"""
-        # 必须先初始化SDK，然后才能调用其他函数
-        ok = self.sdk.NET_DVR_Init()
-        if not ok:
-            err = self.sdk.NET_DVR_GetLastError()
-            print(f"[SDK] 初始化失败: 错误码 {err}")
-            return False
+        global _sdk_init_called
         
-        print(f"[SDK] 初始化成功")
-        
-        # 初始化成功后设置连接参数
-        self.sdk.NET_DVR_SetConnectTime(3000, 3)
-        self.sdk.NET_DVR_SetReconnect(10000, True)
-        print(f"[SDK] 连接参数设置完成")
-        return True
+        with _sdk_lock:
+            if _sdk_init_called:
+                print(f"[SDK] SDK已初始化，直接返回成功")
+                return True
+            
+            # 必须先初始化SDK，然后才能调用其他函数
+            ok = self.sdk.NET_DVR_Init()
+            if not ok:
+                err = self.sdk.NET_DVR_GetLastError()
+                print(f"[SDK] 初始化失败: 错误码 {err}")
+                return False
+            
+            print(f"[SDK] 初始化成功")
+            _sdk_init_called = True
+            
+            # 初始化成功后设置连接参数
+            self.sdk.NET_DVR_SetConnectTime(3000, 3)
+            self.sdk.NET_DVR_SetReconnect(10000, True)
+            print(f"[SDK] 连接参数设置完成")
+            return True
 
     def cleanup(self):
         """清理SDK"""
+        global _sdk_instance
+        
         try:
             if self.user_id >= 0:
                 self.logout()
-            self.sdk.NET_DVR_Cleanup()
-            print("[SDK] 已清理")
+            
+            # 只有主实例才清理SDK
+            if not hasattr(self, '_is_shared_instance') and _sdk_instance is self:
+                self.sdk.NET_DVR_Cleanup()
+                _sdk_instance = None
+                _sdk_init_called = False
+                print("[SDK] 已清理")
+            elif hasattr(self, '_is_shared_instance'):
+                print("[SDK] 共享实例，仅登出不清理SDK")
+            else:
+                print("[SDK] 非主实例，仅登出不清理SDK")
         except Exception as e:
             print(f"[SDK] 清理异常: {e}")
 
