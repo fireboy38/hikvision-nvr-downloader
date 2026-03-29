@@ -48,10 +48,10 @@ jobs:
         # 创建 lib 目录
         New-Item -ItemType Directory -Path "hikvision_java/src/main/resources/lib" -Force
 
-        # 下载 JNA 和 JNA examples
+        # 下载 JNA (examples 在 jna.jar 里面，不需要单独下载)
         Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.13.0/jna-5.13.0.jar" -OutFile "hikvision_java/src/main/resources/lib/jna.jar"
         Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/net/java/dev/jna/jna-platform/5.13.0/jna-platform-5.13.0.jar" -OutFile "hikvision_java/src/main/resources/lib/jna-platform.jar"
-        Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/com/sun/jna/jna/5.13.0/jna-5.13.0.jar" -OutFile "hikvision_java/src/main/resources/lib/examples.jar"
+        # examples.jar 不存在，JNA 的 examples 在 jna.jar 里面
 
         Write-Host "JNA jars downloaded"
 
@@ -59,7 +59,7 @@ jobs:
       run: |
         cd hikvision_java
         New-Item -ItemType Directory -Path bin -Force
-        javac -encoding UTF-8 -cp "src/main/resources/lib/jna.jar;src/main/resources/lib/jna-platform.jar;src/main/resources/lib/examples.jar" -d bin src/main/java/com/hikvision/HikvisionDownloaderCLI.java
+        javac -encoding UTF-8 -cp "src/main/resources/lib/jna.jar;src/main/resources/lib/jna-platform.jar" -d bin src/main/java/com/hikvision/HikvisionDownloaderCLI.java
         if (Test-Path "src/main/resources/lib") {
           Copy-Item -Path "src/main/resources/lib/*" -Destination "bin/" -Recurse -Force
         }
