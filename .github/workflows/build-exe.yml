@@ -116,17 +116,15 @@ jobs:
 
     - name: Create SDK placeholder
       run: |
-        $placeholder = @"
-海康SDK DLL 文件夹
-请从以下地址下载海康SDK并将库文件复制到此目录：
-
-1. 访问 https://www.hikvision.com/cn/
-2. 下载海康网络摄像机SDK
-3. 解压后将"库文件"目录下的所有DLL复制到此目录
-
-或者联系海康威视获取正式SDK。
-"@
-        Set-Content -Path "dist/四川新数录像批量下载器_完整版/sdk/请阅读.txt" -Value $placeholder
+        $content = '海康SDK DLL 文件夹' + "`n"
+        $content += '请从以下地址下载海康SDK并将库文件复制到此目录：' + "`n"
+        $content += "`n"
+        $content += '1. 访问 https://www.hikvision.com/cn/' + "`n"
+        $content += '2. 下载海康网络摄像机SDK' + "`n"
+        $content += '3. 解压后将库文件目录下的所有DLL复制到此目录' + "`n"
+        $content += "`n"
+        $content += '或者联系海康威视获取正式SDK。'
+        Set-Content -Path 'dist/四川新数录像批量下载器_完整版/sdk/请阅读.txt' -Value $content
 
     - name: Get version info
       id: version
