@@ -14,14 +14,27 @@ from datetime import datetime
 # SDK路径配置 - 自动检测exe所在目录或开发环境
 def _get_sdk_path():
     """获取SDK DLL所在目录"""
+    print(f"[SDK DEBUG] 开始检测SDK路径...")
+    print(f"[SDK DEBUG] sys.executable: {sys.executable}")
+    print(f"[SDK DEBUG] frozen: {getattr(sys, 'frozen', False)}")
+    
     # 1. 优先检查PyInstaller打包后的_internal目录
     if getattr(sys, 'frozen', False):
         # PyInstaller目录模式：DLL在_internal子目录
         exe_dir = os.path.dirname(sys.executable)
+        print(f"[SDK DEBUG] exe_dir: {exe_dir}")
+        
         internal_dir = os.path.join(exe_dir, "_internal")
-        if os.path.exists(os.path.join(internal_dir, "HCNetSDK.dll")):
+        print(f"[SDK DEBUG] internal_dir: {internal_dir}")
+        
+        hcnet_path = os.path.join(internal_dir, "HCNetSDK.dll")
+        print(f"[SDK DEBUG] 检查HCNetSDK.dll路径: {hcnet_path}")
+        print(f"[SDK DEBUG] 文件是否存在: {os.path.exists(hcnet_path)}")
+        
+        if os.path.exists(hcnet_path):
             print(f"[SDK] 使用PyInstaller _internal目录: {internal_dir}")
             return internal_dir
+        
         # PyInstaller单文件模式：解压到临时目录
         if os.path.exists(os.path.join(exe_dir, "HCNetSDK.dll")):
             print(f"[SDK] 使用exe目录: {exe_dir}")
@@ -34,10 +47,17 @@ def _get_sdk_path():
         return cwd
     
     # 3. 开发环境：使用SDK安装路径
-    dev_path = r"C:\Users\Administrator\CH-HCNetSDKV6.1.6.45_build20210302_win64_20210508181836\CH-HCNetSDKV6.1.6.45_build20210302_win64\库文件"
-    if os.path.exists(os.path.join(dev_path, "HCNetSDK.dll")):
-        print(f"[SDK] 使用开发环境路径: {dev_path}")
-        return dev_path
+    dev_paths = [
+        # 用户指定的V6.1.11.5版本SDK（优先级最高）
+        r"C:\Users\Administrator\Downloads\HCNetSDKV6.1.11.5_build20251204_Win64_ZH_20260320151956\HCNetSDKV6.1.11.5_build20251204_Win64_ZH\库文件",
+        # 旧版本SDK（备选）
+        r"C:\Users\Administrator\CH-HCNetSDKV6.1.6.45_build20210302_win64_20210508181836\CH-HCNetSDKV6.1.6.45_build20210302_win64\库文件"
+    ]
+    
+    for dev_path in dev_paths:
+        if os.path.exists(os.path.join(dev_path, "HCNetSDK.dll")):
+            print(f"[SDK] 使用开发环境路径: {dev_path}")
+            return dev_path
     
     # 4. 返回_internal目录作为默认（会在后续报错）
     if getattr(sys, 'frozen', False):
@@ -284,30 +304,59 @@ class HCNetSDK:
 
         print("[SDK] 函数原型设置完成")
 
-    def init(self) -> bool:
-        """初始化SDK"""
+    def init(self) -> Tuple[bool, str]:
+        """初始化SDK，返回(success, error_message)"""
         global _sdk_init_called
         
         with _sdk_lock:
             if _sdk_init_called:
                 print(f"[SDK] SDK已初始化，直接返回成功")
-                return True
+                return True, "SDK已初始化"
+            
+            # 检查SDK对象是否有效
+            if not self.sdk:
+                error_msg = "SDK对象为None，无法初始化"
+                print(f"[SDK ERROR] {error_msg}")
+                return False, error_msg
             
             # 必须先初始化SDK，然后才能调用其他函数
+            print(f"[SDK] 调用NET_DVR_Init()...")
             ok = self.sdk.NET_DVR_Init()
             if not ok:
                 err = self.sdk.NET_DVR_GetLastError()
-                print(f"[SDK] 初始化失败: 错误码 {err}")
-                return False
+                error_msg = f"SDK初始化失败: 错误码 {err}"
+                print(f"[SDK ERROR] {error_msg}")
+                
+                # 错误码11 = 命令顺序错误，通常意味着SDK加载失败
+                if err == 11:
+                    detailed_msg = f"错误码11: 命令顺序错误 - SDK可能未正确加载或依赖DLL缺失"
+                    print(f"[SDK ERROR] {detailed_msg}")
+                    # 尝试检查DLL文件
+                    import os
+                    sdk_dll = os.path.join(SDK_PATH, "HCNetSDK.dll")
+                    print(f"[SDK ERROR] SDK路径: {SDK_PATH}")
+                    print(f"[SDK ERROR] DLL文件存在: {os.path.exists(sdk_dll)}")
+                    
+                    # 检查_internal目录
+                    if hasattr(sys, '_MEIPASS'):
+                        meipass = sys._MEIPASS
+                        print(f"[SDK ERROR] _MEIPASS路径: {meipass}")
+                        internal_dll = os.path.join(meipass, "HCNetSDK.dll")
+                        print(f"[SDK ERROR] _MEIPASS中DLL存在: {os.path.exists(internal_dll)}")
+                    
+                    error_msg = f"{error_msg} ({detailed_msg})"
+                
+                return False, error_msg
             
             print(f"[SDK] 初始化成功")
             _sdk_init_called = True
             
             # 初始化成功后设置连接参数
+            print(f"[SDK] 设置连接参数...")
             self.sdk.NET_DVR_SetConnectTime(3000, 3)
             self.sdk.NET_DVR_SetReconnect(10000, True)
             print(f"[SDK] 连接参数设置完成")
-            return True
+            return True, "SDK初始化成功"
 
     def cleanup(self, force=False):
         """清理SDK
@@ -341,6 +390,18 @@ class HCNetSDK:
 
     def login(self, ip: str, port: int, username: str, password: str) -> Tuple[bool, str, Dict]:
         """登录设备，返回 (success, message, device_info)"""
+        # 检查SDK是否已初始化
+        if not self.sdk:
+            print(f"[SDK ERROR] SDK对象为None，无法登录")
+            return False, "SDK未初始化", {}
+        
+        # 检查是否已调用init()
+        global _sdk_init_called
+        if not _sdk_init_called:
+            print(f"[SDK ERROR] SDK未初始化，请先调用init()")
+            return False, "SDK未初始化", {}
+        
+        print(f"[SDK] 尝试登录: {ip}:{port}")
         device_info = NET_DVR_DEVICEINFO_V30()
         user_id = self.sdk.NET_DVR_Login_V30(
             ip.encode('utf-8'), port,
@@ -350,7 +411,14 @@ class HCNetSDK:
         if user_id < 0:
             code = self.sdk.NET_DVR_GetLastError()
             msg = ERROR_CODES.get(code, f"错误码{code}")
-            print(f"[SDK] 登录失败: {msg}")
+            print(f"[SDK ERROR] 登录失败: {msg}")
+            # 如果是命令顺序错误，提供更多信息
+            if code == 11:
+                print(f"[SDK ERROR] 错误码11: 命令顺序错误 - 可能原因:")
+                print(f"[SDK ERROR]   1. SDK未正确初始化")
+                print(f"[SDK ERROR]   2. NET_DVR_Init()调用失败")
+                print(f"[SDK ERROR]   3. DLL依赖缺失")
+                print(f"[SDK ERROR]   4. 工作目录不正确")
             return False, msg, {}
 
         self.user_id = user_id

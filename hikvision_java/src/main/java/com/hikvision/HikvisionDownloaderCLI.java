@@ -14,7 +14,6 @@ import java.util.List;
  * 智能接口选择策略：
  * 1. 优先使用 NET_DVR_GetFileByTime_V40/V50（无1GB文件大小限制）
  * 2. 如果设备不支持，回退到 NET_DVR_GetFileByTime（V30，有1GB限制）
- * 3. 使用竞业达验证的旧版本SDK（5.3.1.61），兼容性更好
  *
  * 用法: java HikvisionDownloaderCLI <ip> <port> <user> <pass> <channel>
  *           <startTime> <endTime> <savePath> <channelName>
@@ -22,14 +21,10 @@ import java.util.List;
  */
 public class HikvisionDownloaderCLI {
 
-    // 使用64位新版本SDK (6.1.6.45) - 配合V40/V50接口和分段策略
-    private static final String HCNETSDK_PATH =
-        "C:\\Users\\Administrator\\CH-HCNetSDKV6.1.6.45_build20210302_win64_20210508181836" +
-        "\\CH-HCNetSDKV6.1.6.45_build20210302_win64\\库文件\\HCNetSDK.dll";
+    // SDK路径 - 动态检测
+    private static String HCNETSDK_PATH = null;
+    
 
-    // 备用：竞业达SDK (5.3.1.61) - 32位，需要32位JDK
-    // private static final String HCNETSDK_PATH =
-    //     "C:\\Users\\Administrator\\WorkBuddy\\20260323192840\\hikvision_java\\HCNetSDK_v531.dll";
 
     private static HCNetSDK sdkInstance = null;
 
@@ -37,6 +32,10 @@ public class HikvisionDownloaderCLI {
     public interface HCNetSDK extends StdCallLibrary {
         static HCNetSDK getInstance() {
             if (sdkInstance == null) {
+                // 动态检测SDK路径
+                if (HCNETSDK_PATH == null) {
+                    HCNETSDK_PATH = detectSdkPath();
+                }
                 sdkInstance = (HCNetSDK) Native.loadLibrary(HCNETSDK_PATH, HCNetSDK.class);
             }
             return sdkInstance;
@@ -332,6 +331,31 @@ public class HikvisionDownloaderCLI {
         }
     }
 
+    // ─────────────────── SDK路径检测 ─────────────────────────────────────────
+    private static String detectSdkPath() {
+        // 优先检测用户指定的V6.1.11.5版本SDK
+        String[] sdkPaths = {
+            // 用户指定的V6.1.11.5版本SDK（优先级最高）
+            "C:\\Users\\Administrator\\Downloads\\HCNetSDKV6.1.11.5_build20251204_Win64_ZH_20260320151956\\HCNetSDKV6.1.11.5_build20251204_Win64_ZH\\库文件\\HCNetSDK.dll",
+            // 旧版本SDK（备选）
+            "C:\\Users\\Administrator\\CH-HCNetSDKV6.1.6.45_build20210302_win64_20210508181836\\CH-HCNetSDKV6.1.6.45_build20210302_win64\\库文件\\HCNetSDK.dll",
+            // 打包后的路径
+            "HCNetSDK.dll",
+            "_internal\\HCNetSDK.dll"
+        };
+        
+        for (String path : sdkPaths) {
+            java.io.File dllFile = new java.io.File(path);
+            if (dllFile.exists()) {
+                System.out.println("[SDK] 检测到DLL路径: " + path);
+                return dllFile.getAbsolutePath();
+            }
+        }
+        
+        System.out.println("[SDK] 警告：未找到HCNetSDK.dll，使用默认路径");
+        return "HCNetSDK.dll";
+    }
+
     // ─────────────────── 错误码描述 ─────────────────────────────────────────
     private static String errDesc(int code) {
         switch (code) {
@@ -406,9 +430,24 @@ public class HikvisionDownloaderCLI {
 
         try {
             // 生成 ASCII 临时路径（避免中文路径编码问题）
+            // 使用 dl_ch{N}_{timestamp} 格式确保多通道下载时文件名唯一
             String dir      = new java.io.File(finalPath).getParent();
+            long timestamp   = System.currentTimeMillis();
             String tempPath = dir + java.io.File.separator
-                + "temp_" + System.currentTimeMillis() + "_ch" + channel + ".mp4";
+                + "dl_ch" + channel + "_" + timestamp + ".mp4";
+
+            // 下载前清理旧的临时文件（匹配 dl_ch{channel}_{timestamp}*.mp4 模式）
+            java.io.File dirFile = new java.io.File(dir);
+            final String cleanupPrefix = "dl_ch" + channel + "_";
+            java.io.File[] oldFiles = dirFile.listFiles((d, name) ->
+                name.startsWith(cleanupPrefix) && name.endsWith(".mp4"));
+            if (oldFiles != null) {
+                for (java.io.File f : oldFiles) {
+                    f.delete();
+                }
+            }
+            // 也删除主临时文件
+            new java.io.File(tempPath).delete();
 
             java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
             java.util.Date startDate = sdf.parse(startStr);
@@ -568,19 +607,10 @@ public class HikvisionDownloaderCLI {
             long size = tempFile.length();
             System.out.println("[OK] Temp file: " + (size / 1024.0 / 1024.0) + " MB  (" + tempPath + ")");
 
-            // ── [9] 重命名为最终路径 ──────────────────────────────────────
-            System.out.println("[6] Rename to: " + finalPath);
-            java.io.File finalFile = new java.io.File(finalPath);
-            if (finalFile.exists()) finalFile.delete();
-
-            boolean renamed = tempFile.renameTo(finalFile);
-            if (!renamed) {
-                System.out.println("[WARN] Rename failed, keeping temp file: " + tempPath);
-                System.out.println("[OK] Download complete, file saved to: " + tempPath);
-            } else {
-                System.out.println("[OK] Download complete!");
-                System.out.println("[OK] File: " + finalPath);
-            }
+            // ── [9] 不rename！由Python统一处理合并和改名 ─────────────────
+            // SDK可能产生多个分包文件(_1.mp4, _2.mp4等)，都保留在临时目录
+            // Python会检测所有 dl_ch{channel}_{timestamp}*.mp4 文件并处理
+            System.out.println("[OK] Download complete! Python will handle merge and rename.");
             System.out.println("[OK] Size: " + (size / 1024.0 / 1024.0) + " MB");
             System.out.println("\nNOTE: File is in MPEG/PS format, needs FFmpeg conversion to MP4");
             System.exit(0);

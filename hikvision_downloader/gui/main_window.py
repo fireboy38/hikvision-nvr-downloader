@@ -32,7 +32,6 @@ from core.downloader import DownloadManager, DownloadTask, DownloadStatus, Batch
 STATUS_COLORS = {
     DownloadStatus.PENDING:     QColor(128, 128, 128),
     DownloadStatus.DOWNLOADING: QColor(0, 120, 215),
-    DownloadStatus.MERGING:     QColor(255, 152, 0),   # 橙色
     DownloadStatus.COMPLETED:   QColor(0, 153, 76),
     DownloadStatus.FAILED:      QColor(232, 17, 35),
     DownloadStatus.CANCELLED:   QColor(160, 160, 160),
@@ -40,7 +39,6 @@ STATUS_COLORS = {
 STATUS_TEXT = {
     DownloadStatus.PENDING:     "等待中",
     DownloadStatus.DOWNLOADING: "下载中",
-    DownloadStatus.MERGING:     "合并中",
     DownloadStatus.COMPLETED:   "已完成",
     DownloadStatus.FAILED:      "失败",
     DownloadStatus.CANCELLED:   "已取消",
@@ -927,8 +925,9 @@ class ConnectWorker(QThread):
             cfg = self.config
 
             sdk = HCNetSDK()
-            if not sdk.init():
-                self.result_ready.emit(False, "SDK初始化失败", {}, [])
+            init_ok, init_msg = sdk.init()
+            if not init_ok:
+                self.result_ready.emit(False, f"SDK初始化失败: {init_msg}", {}, [])
                 return
 
             ok, msg, dev = sdk.login(
@@ -1624,11 +1623,12 @@ class MainWindow(QMainWindow):
 
             # 使用SDK获取设备基本信息
             sdk = HCNetSDK()
-            if not sdk.init():
+            init_ok, init_msg = sdk.init()
+            if not init_ok:
                 QTimer.singleShot(0, lambda: QMessageBox.warning(
-                    self, "查询失败", f"{cfg['name']}: SDK初始化失败"
+                    self, "查询失败", f"{cfg['name']}: SDK初始化失败 - {init_msg}"
                 ))
-                log(f"❌ {cfg['name']}: SDK初始化失败")
+                log(f"❌ {cfg['name']}: SDK初始化失败 - {init_msg}")
                 return
 
             # 登录获取设备信息
@@ -2142,8 +2142,9 @@ class MainWindow(QMainWindow):
             try:
                 from core.hcnetsdk import HCNetSDK
                 sdk = HCNetSDK()
-                if not sdk.init():
-                    return cfg, False, "SDK初始化失败", {}, []
+                init_ok, init_msg = sdk.init()
+                if not init_ok:
+                    return cfg, False, f"SDK初始化失败: {init_msg}", {}, []
 
                 ok, msg, dev = sdk.login(
                     cfg['host'], cfg.get('port', 8000),
@@ -2639,10 +2640,10 @@ class MainWindow(QMainWindow):
                     bytes_recv = net_io.bytes_recv - self._last_net_io.bytes_recv
                     total_bytes = bytes_sent + bytes_recv
                     total_speed = total_bytes / elapsed
-                    # 检查是否有活跃下载任务（下载中或合并中）
+                    # 检查是否有活跃下载任务（下载中）
                     for task_id in list(self._download_start_times.keys()):
                         task = self._dm.get_task(task_id)
-                        if task and task.status in (DownloadStatus.DOWNLOADING, DownloadStatus.MERGING):
+                        if task and task.status == DownloadStatus.DOWNLOADING:
                             active_count += 1
             self._last_net_io = net_io
             self._last_net_time = now
@@ -3437,7 +3438,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
 
         # 停止按钮：仅对等待中或下载中的任务可用
-        can_stop = task.status in (DownloadStatus.PENDING, DownloadStatus.DOWNLOADING, DownloadStatus.MERGING)
+        can_stop = task.status in (DownloadStatus.PENDING, DownloadStatus.DOWNLOADING)
         action_stop = menu.addAction("⏹ 停止此任务")
         action_stop.setEnabled(can_stop)
         action_stop.triggered.connect(lambda checked, tid=task_id, t=task: self._stop_single_task(tid, t))
@@ -3445,7 +3446,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
 
         # 删除按钮：仅对非下载中的任务可用
-        can_delete = task.status not in (DownloadStatus.DOWNLOADING, DownloadStatus.MERGING)
+        can_delete = task.status != DownloadStatus.DOWNLOADING
         action_delete = menu.addAction("🗑 删除此任务")
         action_delete.setEnabled(can_delete)
         action_delete.triggered.connect(lambda checked, tid=task_id, t=task: self._delete_single_task(tid, t))

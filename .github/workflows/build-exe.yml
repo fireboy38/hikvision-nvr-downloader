@@ -1,8 +1,7 @@
 name: Build Windows EXE
 
 on:
-  # 只在手动触发或创建tag时编译
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
     inputs:
       release_type:
         description: '发布类型'
@@ -14,8 +13,7 @@ on:
           - stable
   push:
     tags:
-      - 'v*'  # 创建v开头的tag时触发（如v1.0.0）
-  # 移除 push 和 pull_request 自动触发
+      - 'v*'
 
 permissions:
   contents: write
@@ -23,66 +21,65 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
         pip install -r requirements.txt
-        
-    - name: Build EXE with PyInstaller
-      run: |
-        python -m PyInstaller --noconfirm --onefile --windowed `
-          --name "四川新数录像批量下载器" `
-          --paths "hikvision_downloader" `
-          --hidden-import PyQt5 `
-          --hidden-import PyQt5.sip `
-          --hidden-import requests `
-          --hidden-import urllib3 `
-          --hidden-import xml.etree.ElementTree `
-          --hidden-import xml.etree.cElementTree `
-          --hidden-import json `
-          --hidden-import datetime `
-          --hidden-import os `
-          --hidden-import sys `
-          --hidden-import subprocess `
-          --hidden-import threading `
-          --hidden-import time `
-          --hidden-import re `
-          --hidden-import pathlib `
-          --hidden-import typing `
-          --hidden-import dataclasses `
-          --hidden-import gui `
-          --hidden-import gui.main_window `
-          --hidden-import core `
-          --hidden-import core.downloader `
-          --hidden-import core.java_downloader `
-          --hidden-import core.nvr_api `
-          --hidden-import core.hcnetsdk `
-          --hidden-import core.channel_manager `
-          --hidden-import core.device_info `
-          --hidden-import core.hikload_downloader `
-          --hidden-import core.isapi_downloader `
-          --hidden-import core.osd_manager `
-          --hidden-import utils `
-          --hidden-import utils.logger `
-          hikvision_downloader/main.py
-        
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
+
+    - name: Install Java
+      uses: actions/setup-java@v4
       with:
-        name: 四川新数录像批量下载器-Windows
-        path: dist/四川新数录像批量下载器.exe
-        
+        distribution: 'temurin'
+        java-version: '12'
+
+    - name: Compile Java
+      run: |
+        cd hikvision_java
+        New-Item -ItemType Directory -Path bin -Force
+        javac -encoding UTF-8 -cp "src/main/resources/lib/jna.jar;src/main/resources/lib/examples.jar" -d bin src/main/java/com/hikvision/HikvisionDownloaderCLI.java
+        if (Test-Path "src/main/resources/lib") {
+          Copy-Item -Path "src/main/resources/lib/*" -Destination "bin/" -Recurse -Force
+        }
+
+    - name: Build EXE (without SDK DLL)
+      run: |
+        cd hikvision_downloader
+        python -m PyInstaller --noconfirm --clean build_github.spec
+
+    - name: Create output directory
+      run: |
+        New-Item -ItemType Directory -Path "dist/四川新数录像批量下载器_基础版/_internal" -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path "dist/四川新数录像批量下载器_基础版/java" -Force -ErrorAction SilentlyContinue
+
+    - name: Copy EXE
+      run: |
+        $src = "hikvision_downloader/dist/四川新数录像批量下载器/四川新数录像批量下载器.exe"
+        if (Test-Path $src) {
+          Copy-Item $src "dist/四川新数录像批量下载器_基础版/" -Force
+        }
+
+    - name: Copy _internal
+      run: |
+        $src = "hikvision_downloader/dist/四川新数录像批量下载器/_internal"
+        if (Test-Path $src) {
+          Copy-Item "$src/*" "dist/四川新数录像批量下载器_基础版/_internal/" -Recurse -Force
+        }
+
+    - name: Copy Java files
+      run: |
+        Copy-Item "hikvision_java/bin/*" "dist/四川新数录像批量下载器_基础版/java/" -Recurse -Force
+
     - name: Get version info
       id: version
       run: |
@@ -90,14 +87,26 @@ jobs:
         $shortSha = "${{ github.sha }}".Substring(0, 7)
         echo "date=$date" >> $env:GITHUB_OUTPUT
         echo "sha=$shortSha" >> $env:GITHUB_OUTPUT
-        
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: 四川新数录像批量下载器-基础版
+        path: dist/四川新数录像批量下载器_基础版/
+        retention-days: 30
+
+    - name: Create zip for release
+      run: |
+        cd dist
+        Compress-Archive -Path "四川新数录像批量下载器_基础版/*" -DestinationPath "四川新数录像批量下载器_基础版.zip" -Force
+
     - name: Delete old nightly release
       if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'nightly'
       run: |
         gh release delete nightly --yes --cleanup-tag=false || true
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        
+
     - name: Create Nightly Release
       if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'nightly'
       uses: softprops/action-gh-release@v1
@@ -106,61 +115,71 @@ jobs:
         name: Nightly Build (${{ steps.version.outputs.date }})
         body: |
           ## 自动构建版本
-          
+
           **构建时间**: ${{ steps.version.outputs.date }}
           **提交**: ${{ steps.version.outputs.sha }}
-          
+
+          ### ⚠️ 重要说明
+          此为基础版，**不包含海康SDK DLL**。如需SDK模式功能，请使用本地完整打包。
+
+          ### 下载内容
+          - `四川新数录像批量下载器_基础版.zip`
+          - 已包含 Java SDK 组件
+          - 已包含 Python 依赖
+
           ### 使用方法
-          1. 下载下方的 `四川新数录像批量下载器.exe`
-          2. **重要**: 需要将海康SDK DLL文件放在exe同目录下才能使用SDK功能
-          3. ISAPI模式可直接使用，无需SDK
-          
-          ### 功能说明
-          - **ISAPI模式**: 纯HTTP下载，无需SDK，推荐使用
-          - **SDK模式**: 需要海康SDK DLL文件
-          
-          ### DLL文件（SDK模式需要）
-          将以下DLL放在exe同目录：
-          - HCNetSDK.dll
-          - HCCore.dll
-          - hpr.dll
-          - PlayCtrl.dll
-          - StreamTransClient.dll
-          - SuperRender.dll
-          - AudioRender.dll
-          - GdiPlus.dll
-          - HCNetSDKCom文件夹
-          
+          1. 解压到任意目录
+          2. 运行 `四川新数录像批量下载器.exe`
+          3. **推荐使用 ISAPI 模式**（无需SDK）
+
+          ### 功能支持
+          | 模式 | 支持情况 |
+          |------|---------|
+          | ISAPI模式 | ✅ 完全支持 |
+          | SDK模式 | ⚠️ 需自行添加SDK DLL |
+          | HikLoad模式 | ✅ 完全支持 |
+
           > **注意**: 这是自动构建版本，可能包含最新但未经充分测试的功能。
-        files: dist/四川新数录像批量下载器.exe
+        files: dist/四川新数录像批量下载器_基础版.zip
         draft: false
         prerelease: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        
-    - name: Create Stable Release (on tag or manual stable)
+
+    - name: Create Stable Release
       if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'stable')
       uses: softprops/action-gh-release@v1
       with:
         name: 四川新数录像批量下载器 ${{ github.ref_name || steps.version.outputs.date }}
         body: |
           ## 四川新数录像批量下载器
-          
+
           **构建时间**: ${{ steps.version.outputs.date }}
           **版本**: ${{ github.ref_name || 'Stable Build' }}
-          
+
+          ### ⚠️ 重要说明
+          此为基础版，**不包含海康SDK DLL**。如需SDK模式功能，请使用本地完整打包。
+
+          ### 下载内容
+          - `四川新数录像批量下载器_基础版.zip`
+          - 已包含 Java SDK 组件
+          - 已包含 Python 依赖
+
           ### 使用方法
-          1. 下载 `四川新数录像批量下载器.exe`
-          2. **重要**: 需要将海康SDK DLL文件放在exe同目录下才能使用SDK功能
-          3. ISAPI模式可直接使用，无需SDK
-          
-          ### 功能说明
-          - **ISAPI模式**: 纯HTTP下载，无需SDK，推荐使用
-          - **SDK模式**: 需要海康SDK DLL文件
-          
+          1. 解压到任意目录
+          2. 运行 `四川新数录像批量下载器.exe`
+          3. **推荐使用 ISAPI 模式**（无需SDK）
+
+          ### 功能支持
+          | 模式 | 支持情况 |
+          |------|---------|
+          | ISAPI模式 | ✅ 完全支持 |
+          | SDK模式 | ⚠️ 需自行添加SDK DLL |
+          | HikLoad模式 | ✅ 完全支持 |
+
           ### 更新日志
           请查看 [commits](https://github.com/${{ github.repository }}/commits/main) 了解详情。
-        files: dist/四川新数录像批量下载器.exe
+        files: dist/四川新数录像批量下载器_基础版.zip
         draft: false
         prerelease: false
       env:

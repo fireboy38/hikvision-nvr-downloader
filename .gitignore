@@ -85,3 +85,8 @@ bin/
 *.zip
 DemoLocalCfg.json
 DeviceCfg.json
+
+# Distribution packages
+dist/
+installer/
+*.exe

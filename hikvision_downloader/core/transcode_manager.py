@@ -153,11 +153,7 @@ class TranscodeManager:
             
     def _run_transcode(self, task: TranscodeTask):
         """执行转码任务"""
-        from .java_downloader import (
-            _ffmpeg_concat_ultra, _ffmpeg_concat_fast, _ffmpeg_concat_standard,
-            MERGE_MODE_ULTRA, MERGE_MODE_FAST, MERGE_MODE_STANDARD,
-            setup_download_logger, logger
-        )
+        pass  # 分包功能已禁用
         
         task.status = TranscodeStatus.TRANSCODING
         task.started_at = datetime.now()

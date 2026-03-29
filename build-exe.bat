@@ -73,8 +73,13 @@ if exist "hikvision_java\bin\examples.jar" (
 )
 
 REM 复制DLL文件
-echo [7/7] 复制DLL文件...
-set SDK_PATH=C:\Users\Administrator\CH-HCNetSDKV6.1.6.45_build20210302_win64_20210508181836\CH-HCNetSDKV6.1.6.45_build20210302_win64\库文件
+echo [7/8] 复制DLL文件...
+set SDK_PATH=C:\Users\Administrator\Downloads\HCNetSDKV6.1.11.5_build20251204_Win64_ZH_20260320151956\CH-HCNetSDKV6.1.11.5_build20251204_Win64_ZH\库文件
+
+REM 也检查备用路径
+if not exist "%SDK_PATH%" (
+    set SDK_PATH=C:\Users\Administrator\CH-HCNetSDKV6.1.6.45_build20210302_win64_20210508181836\CH-HCNetSDKV6.1.6.45_build20210302_win64\库文件
+)
 
 if not exist "%SDK_PATH%" (
     echo [错误] SDK路径不存在: %SDK_PATH%
@@ -109,9 +114,20 @@ for %%f in (
 REM HCNetSDKCom文件夹
 if exist "%SDK_PATH%\HCNetSDKCom" (
     xcopy /E /I /Y "%SDK_PATH%\HCNetSDKCom" "dist\四川新数录像批量下载器\HCNetSDKCom\" >nul
-    echo   - HCNetSDKCom\* (15个dll文件)
+    echo   - HCNetSDKCom\* (子目录dll)
 ) else (
     echo [警告] 未找到 HCNetSDKCom 文件夹
+)
+
+REM 复制Java编译后的class文件
+echo [8/8] 复制Java class文件...
+if exist "hikvision_java\bin\com" (
+    xcopy /E /I /Y "hikvision_java\bin\com" "dist\四川新数录像批量下载器\hikvision_java\bin\com\" >nul 2>&1
+    echo   - Java class文件
+)
+if exist "hikvision_java\src\main\resources\lib" (
+    xcopy /E /I /Y "hikvision_java\src\main\resources\lib" "dist\四川新数录像批量下载器\hikvision_java\lib\" >nul 2>&1
+    echo   - Java lib文件
 )
 
 REM 配置文件
@@ -125,6 +141,27 @@ if exist "%SDK_PATH%\DeviceCfg.json" (
 
 if exist "%SDK_PATH%\LocalSensorAdd.dat" (
     copy /Y "%SDK_PATH%\LocalSensorAdd.dat" "dist\四川新数录像批量下载器\" >nul
+)
+
+REM 复制V6.1.11.5 SDK的其他必要DLL
+echo [7.5/8] 复制V6.1.11.5 SDK额外DLL...
+for %%f in (
+    AudioProcess.dll
+    hlog.dll
+    HmMerge.dll
+    HXVA.dll
+    libcrypto-3-x64.dll
+    libmmd.dll
+    libssl-3-x64.dll
+    MP_Render.dll
+    NPQos.dll
+    YUVProcess.dll
+    zlib1.dll
+) do (
+    if exist "%SDK_PATH%\%%f" (
+        copy /Y "%SDK_PATH%\%%f" "dist\四川新数录像批量下载器\" >nul
+        echo   - %%f
+    )
 )
 
 echo.

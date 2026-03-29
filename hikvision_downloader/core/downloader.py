@@ -9,15 +9,11 @@ from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
-# 导入转码管理器
-from .transcode_manager import TranscodeManager, TranscodeTask, TranscodeStatus, get_transcode_manager
-
 
 class DownloadStatus(Enum):
     """下载状态"""
     PENDING     = "pending"
     DOWNLOADING = "downloading"
-    MERGING     = "merging"    # 下载完成，合并中
     COMPLETED   = "completed"
     FAILED      = "failed"
     CANCELLED   = "cancelled"
@@ -40,13 +36,13 @@ class DownloadTask:
     error_message:str = ""
     created_at:   datetime = field(default_factory=datetime.now)
     device_config: Optional[Dict[str, Any]] = None  # 设备配置（支持多设备）
-    merge_mode:   str = "standard"  # 合并模式：fast 或 standard
+    merge_mode:   str = "fast"  # 合并模式：fast 或 standard
     enable_debug_log: bool = False  # 是否启用调试日志
     skip_transcode: bool = True  # 是否跳过转码（默认跳过）
     
-    # 下载和转码分离架构
-    transcode_async: bool = True  # 是否异步转码（下载完成后立即释放槽位）
-    transcode_task_id: Optional[str] = None  # 关联的转码任务ID
+    # 以下字段已废弃，保留兼容性
+    transcode_async: bool = True  # 已废弃，不再使用
+    transcode_task_id: Optional[str] = None  # 已废弃，不再使用
 
 
     def __post_init__(self):
@@ -129,10 +125,6 @@ class DownloadManager:
         # 按设备的并发信号量 {device_id: Semaphore}
         # 每台NVR最多同时 max_concurrent_per_device 个下载
         self._device_semaphores: Dict[str, threading.Semaphore] = {}
-        
-        # 转码管理器（下载和转码分离）
-        self._transcode_manager: Optional[TranscodeManager] = None
-        self._transcode_workers = transcode_workers
 
     # -------- 任务管理 --------
 
@@ -183,7 +175,7 @@ class DownloadManager:
     def cancel_all(self):
         with self._lock:
             for task in self.tasks.values():
-                if task.status in (DownloadStatus.PENDING, DownloadStatus.DOWNLOADING, DownloadStatus.MERGING):
+                if task.status in (DownloadStatus.PENDING, DownloadStatus.DOWNLOADING):
                     task.status = DownloadStatus.CANCELLED
 
     def clear_completed(self):
@@ -241,15 +233,6 @@ class DownloadManager:
             w = threading.Thread(target=self._worker, name=f"DownloadWorker-{i}", daemon=True)
             w.start()
             self._workers.append(w)
-        
-        # 启动转码管理器（下载和转码分离）
-        if self._transcode_manager is None:
-            self._transcode_manager = get_transcode_manager(max_concurrent=self._transcode_workers)
-            # 设置转码回调
-            self._transcode_manager.on_log = self._on_transcode_log
-            self._transcode_manager.on_status = self._on_transcode_status
-            self._transcode_manager.on_completion = self._on_transcode_completion
-            print(f"[DownloadManager] 转码管理器已启动 ({self._transcode_workers} 个转码线程)")
 
     def stop(self):
         self._running = False
@@ -262,10 +245,6 @@ class DownloadManager:
         for w in self._workers:
             w.join(timeout=3)
         self._workers.clear()
-        # 停止转码管理器
-        if self._transcode_manager:
-            self._transcode_manager.stop()
-            self._transcode_manager = None
 
     # -------- 工作线程 --------
 
@@ -310,8 +289,8 @@ class DownloadManager:
             return self._device_semaphores[device_id]
 
     def _run_task_hiksdk(self, task: DownloadTask):
-        """使用Java下载器执行下载任务（下载和转码分离架构）"""
-        from .java_downloader import download_with_java, download_only, MERGE_MODE_STANDARD
+        """使用Java下载器执行下载任务（直接下载，然后执行合并）"""
+        from .java_downloader import download_and_merge, MERGE_MODE_FAST
 
         # 先获取设备配置和信号量，再更新状态
         cfg = task.device_config if task.device_config else self._device_config
@@ -365,93 +344,58 @@ class DownloadManager:
             
             success = False
             msg = ""
-            transcode_info = None
+            final_path = ""
 
             for attempt in range(1, max_retries + 1):
                 try:
+                    # 直接下载完整录像，然后执行合并
+                    success, msg, final_path = download_and_merge(
+                        ip=cfg.get('host', ''),
+                        port=cfg.get('port', 8000),
+                        username=cfg.get('username', 'admin'),
+                        password=cfg.get('password', ''),
+                        channel=channel_no,
+                        start_time=task.start_time,
+                        end_time=task.end_time,
+                        save_dir=task.save_dir,
+                        channel_name=task.channel_name,
+                        task_id=task.task_id,
+                        progress_callback=_progress,
+                        gui_log_callback=_gui_log,
+                        merge_mode=MERGE_MODE_FAST,
+                        skip_transcode=task.skip_transcode,
+                    )
                     
-                    # 根据是否异步转码选择下载方式
-                    if task.transcode_async and task.merge_mode == MERGE_MODE_STANDARD:
-                        # 下载和转码分离：只下载原始文件，转码由独立线程池处理
-                        print(f"[DownloadManager] 使用下载和转码分离模式 (通道{channel_no})")
-                        success, msg, transcode_info = download_only(
-                            ip=cfg.get('host', ''),
-                            port=cfg.get('port', 8000),
-                            username=cfg.get('username', 'admin'),
-                            password=cfg.get('password', ''),
-                            channel=channel_no,
-                            start_time=task.start_time,
-                            end_time=task.end_time,
-                            save_dir=task.save_dir,
-                            channel_name=task.channel_name,
-                            progress_callback=_progress,
-                            gui_log_callback=_gui_log,
-                            enable_debug_log=task.enable_debug_log,
-                        )
+                    # 判断是否需要重试（登录失败类错误才重试）
+                    if success:
+                        break
+                    login_errors = ["登录失败", "连接数量超限", "Login failed", "连接超时", "error: 7", "error: 4"]
+                    should_retry = any(e in msg for e in login_errors)
+                    if should_retry and attempt < max_retries:
+                        wait = retry_delay * attempt
+                        print(f"[DownloadManager] 下载失败(可能是并发限制), {wait}秒后重试... 错误:{msg}")
+                        time.sleep(wait)
                     else:
-                        # 传统模式：下载并立即转码/合并（占用槽位直到完成）
-                        success, msg = download_with_java(
-                            ip=cfg.get('host', ''),
-                            port=cfg.get('port', 8000),
-                            username=cfg.get('username', 'admin'),
-                            password=cfg.get('password', ''),
-                            channel=channel_no,
-                            start_time=task.start_time,
-                            end_time=task.end_time,
-                            save_path=task.file_path,
-                            channel_name=task.channel_name,
-                            progress_callback=_progress,
-                            merge_mode=task.merge_mode,
-                            enable_debug_log=task.enable_debug_log,
-                            gui_log_callback=_gui_log,
-                            skip_transcode=task.skip_transcode
-                        )
-
-                finally:
-                    # 下载完成后立即释放槽位！
-                    sem.release()
-                    print(f"[DownloadManager] 释放设备 {device_id} 的下载槽位 (通道{channel_no})")
-                    
-                    # 如果是异步转码模式且下载成功，立即提交转码任务
-                    if task.transcode_async and transcode_info and success:
-                        self._submit_transcode_task(task, transcode_info)
-
-                # 判断是否需要重试（登录失败类错误才重试）
-                if success:
-                    break
-                login_errors = ["登录失败", "连接数量超限", "Login failed", "连接超时", "error: 7", "error: 4"]
-                should_retry = any(e in msg for e in login_errors)
-                if should_retry and attempt < max_retries:
-                    wait = retry_delay * attempt
-                    print(f"[DownloadManager] 下载失败(可能是并发限制), {wait}秒后重试... 错误:{msg}")
-                    time.sleep(wait)
-                else:
+                        break
+                except Exception as e:
+                    msg = str(e)
                     break
 
             elapsed = time.time() - t0
 
+            # 释放槽位
+            sem.release()
+            print(f"[DownloadManager] 释放设备 {device_id} 的下载槽位 (通道{channel_no})")
+
             if success:
-                # 判断是否需要合并（transcode_info 非空表示有分段需要合并）
-                if task.transcode_async and transcode_info:
-                    # 异步合并模式：下载完成，进入合并状态
-                    task.status = DownloadStatus.MERGING
-                    task.progress = 100
-                    task.error_message = ""
-                    success_msg = f"✓ 下载完成(合并中): ch{channel_no} ({task.channel_name}) - {msg}, 耗时:{elapsed:.1f}秒"
-                    print(f"[JavaDownloader] {success_msg}")
-                    _gui_log(success_msg)
-                    # 只更新状态，不触发完成回调（等合并完成后再触发）
-                    self._fire_status(task)
-                else:
-                    # 无需合并（单段或已完成合并）：直接完成
-                    task.status = DownloadStatus.COMPLETED
-                    task.progress = 100
-                    task.error_message = ""
-                    success_msg = f"✓ 下载完成: ch{channel_no} ({task.channel_name}) - {msg}, 耗时:{elapsed:.1f}秒"
-                    print(f"[JavaDownloader] {success_msg}")
-                    _gui_log(success_msg)
-                    self._fire_status(task)
-                    self._fire_completion(task)
+                task.status = DownloadStatus.COMPLETED
+                task.progress = 100
+                task.error_message = ""
+                success_msg = f"✓ 下载完成: ch{channel_no} ({task.channel_name}) - {msg}, 耗时:{elapsed:.1f}秒"
+                print(f"[JavaDownloader] {success_msg}")
+                _gui_log(success_msg)
+                self._fire_status(task)
+                self._fire_completion(task)
             else:
                 task.status = DownloadStatus.FAILED
                 task.error_message = msg
@@ -462,88 +406,15 @@ class DownloadManager:
                 self._fire_completion(task)
 
         except Exception as e:
+            # 确保异常时也释放槽位
+            sem.release()
+            print(f"[DownloadManager] 释放设备 {device_id} 的下载槽位 (通道{channel_no}) [异常]")
+            
             task.status = DownloadStatus.FAILED
             task.error_message = str(e)
             print(f"[JavaDownloader] 异常: {e}")
             self._fire_status(task)
             
-    def _submit_transcode_task(self, download_task: DownloadTask, transcode_info: Dict):
-        """提交转码任务到转码管理器"""
-        if not self._transcode_manager:
-            return
-            
-        # 创建转码任务
-        tc_task = TranscodeTask(
-            task_id=transcode_info['task_id'],
-            channel=transcode_info['channel'],
-            channel_name=transcode_info['channel_name'],
-            device_id=transcode_info['device_id'],
-            seg_files=transcode_info['seg_files'],
-            seg_raw_files=transcode_info['seg_raw_files'],
-            temp_dir=transcode_info['temp_dir'],
-            merge_points=transcode_info['merge_points'],
-            save_path=transcode_info['save_path'],
-            merge_mode=download_task.merge_mode,
-            skip_transcode=download_task.skip_transcode,
-        )
-        
-        # 关联转码任务ID
-        download_task.transcode_task_id = tc_task.task_id
-        download_task.file_path = transcode_info['save_path']
-        
-        # 提交到转码队列
-        self._transcode_manager.add_task(tc_task)
-        print(f"[DownloadManager] 已提交转码任务: {tc_task.task_id} ({tc_task.channel_name})")
-        
-    def _on_transcode_log(self, msg: str):
-        """转码日志回调"""
-        if self.on_log:
-            try:
-                self.on_log(msg)
-            except Exception:
-                pass
-
-    def _on_transcode_status(self, task: TranscodeTask):
-        """转码状态回调"""
-        pass
-
-    def _on_transcode_completion(self, task: TranscodeTask):
-        """转码完成回调"""
-        status_str = "完成" if task.status == TranscodeStatus.COMPLETED else "失败"
-        print(f"[DownloadManager] 转码任务 {status_str}: {task.channel_name}")
-        
-        # 更新对应的下载任务状态
-        download_task = self.tasks.get(task.task_id)
-        if download_task:
-            if task.status == TranscodeStatus.COMPLETED:
-                download_task.status = DownloadStatus.COMPLETED
-                download_task.file_path = task.save_path  # 更新最终文件路径
-                try:
-                    size_mb = os.path.getsize(task.save_path) / 1024 / 1024
-                    if self.on_log:
-                        self.on_log(f"✓ 合并完成: {task.channel_name} ({size_mb:.1f}MB)")
-                except Exception:
-                    if self.on_log:
-                        self.on_log(f"✓ 合并完成: {task.channel_name}")
-            else:
-                download_task.status = DownloadStatus.FAILED
-                download_task.error_message = task.error_message
-                if self.on_log:
-                    self.on_log(f"✗ 合并失败: {task.channel_name} - {task.error_message}")
-            # 通知UI更新状态
-            self._fire_status(download_task)
-            # 触发完成回调（此时状态为COMPLETED或FAILED）
-            self._fire_completion(download_task)
-        elif self.on_log:
-            try:
-                if task.status == TranscodeStatus.COMPLETED:
-                    size_mb = os.path.getsize(task.save_path) / 1024 / 1024
-                    self.on_log(f"[TRANSCODE-OK] {task.channel_name} 转码完成: {size_mb:.1f}MB")
-                else:
-                    self.on_log(f"[TRANSCODE-FAIL] {task.channel_name} 转码失败: {task.error_message}")
-            except Exception:
-                pass
-
     def _run_task(self, sdk, task: DownloadTask):
         """执行单个下载任务"""
         # 更新状态
