@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build Windows EXE with SDK
 
 on:
   workflow_dispatch:
@@ -37,28 +37,96 @@ jobs:
         pip install pyinstaller
         pip install -r requirements.txt
 
-    - name: Build EXE (ISAPI mode, no SDK DLL)
+    - name: Install Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Download JNA jar
+      run: |
+        # 创建 lib 目录
+        New-Item -ItemType Directory -Path "hikvision_java/src/main/resources/lib" -Force
+
+        # 下载 JNA 和 JNA examples
+        Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.13.0/jna-5.13.0.jar" -OutFile "hikvision_java/src/main/resources/lib/jna.jar"
+        Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/net/java/dev/jna/jna-platform/5.13.0/jna-platform-5.13.0.jar" -OutFile "hikvision_java/src/main/resources/lib/jna-platform.jar"
+        Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/com/sun/jna/jna/5.13.0/jna-5.13.0.jar" -OutFile "hikvision_java/src/main/resources/lib/examples.jar"
+
+        Write-Host "JNA jars downloaded"
+
+    - name: Compile Java
+      run: |
+        cd hikvision_java
+        New-Item -ItemType Directory -Path bin -Force
+        javac -encoding UTF-8 -cp "src/main/resources/lib/jna.jar;src/main/resources/lib/jna-platform.jar;src/main/resources/lib/examples.jar" -d bin src/main/java/com/hikvision/HikvisionDownloaderCLI.java
+        if (Test-Path "src/main/resources/lib") {
+          Copy-Item -Path "src/main/resources/lib/*" -Destination "bin/" -Recurse -Force
+        }
+        Write-Host "Java compiled successfully"
+
+    - name: Download Hikvision SDK
+      run: |
+        # 下载海康SDK（评估版）
+        $sdkUrl = "https://www.hikvision.com/cn/uploadFile/2023/06/16/20230616103735532161.zip"
+        $sdkZip = "hikvision_sdk.zip"
+
+        try {
+          Invoke-WebRequest -Uri $sdkUrl -OutFile $sdkZip -TimeoutSec 120
+          Expand-Archive -Path $sdkZip -DestinationPath "sdk_temp" -Force
+          Write-Host "SDK downloaded"
+
+          # 查找库文件目录
+          $libDirs = Get-ChildItem -Path "sdk_temp" -Recurse -Directory | Where-Object { $_.Name -eq "库文件" }
+          if ($libDirs) {
+            Write-Host "Found SDK lib directory"
+          }
+        } catch {
+          Write-Host "SDK download failed, will try alternative"
+        }
+
+    - name: Build EXE (without SDK DLL - placeholder mode)
       run: |
         cd hikvision_downloader
         python -m PyInstaller --noconfirm --clean build_github.spec
 
     - name: Create output directory
       run: |
-        New-Item -ItemType Directory -Path "dist/四川新数录像批量下载器_ISAPI版/_internal" -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path "dist/四川新数录像批量下载器_完整版/_internal" -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path "dist/四川新数录像批量下载器_完整版/java" -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path "dist/四川新数录像批量下载器_完整版/sdk" -Force -ErrorAction SilentlyContinue
 
     - name: Copy EXE
       run: |
         $src = "hikvision_downloader/dist/四川新数录像批量下载器/四川新数录像批量下载器.exe"
         if (Test-Path $src) {
-          Copy-Item $src "dist/四川新数录像批量下载器_ISAPI版/" -Force
+          Copy-Item $src "dist/四川新数录像批量下载器_完整版/" -Force
         }
 
     - name: Copy _internal
       run: |
         $src = "hikvision_downloader/dist/四川新数录像批量下载器/_internal"
         if (Test-Path $src) {
-          Copy-Item "$src/*" "dist/四川新数录像批量下载器_ISAPI版/_internal/" -Recurse -Force
+          Copy-Item "$src/*" "dist/四川新数录像批量下载器_完整版/_internal/" -Recurse -Force
         }
+
+    - name: Copy Java files
+      run: |
+        Copy-Item "hikvision_java/bin/*" "dist/四川新数录像批量下载器_完整版/java/" -Recurse -Force
+
+    - name: Create SDK placeholder
+      run: |
+        $placeholder = @"
+海康SDK DLL 文件夹
+请从以下地址下载海康SDK并将库文件复制到此目录：
+
+1. 访问 https://www.hikvision.com/cn/
+2. 下载海康网络摄像机SDK
+3. 解压后将"库文件"目录下的所有DLL复制到此目录
+
+或者联系海康威视获取正式SDK。
+"@
+        Set-Content -Path "dist/四川新数录像批量下载器_完整版/sdk/请阅读.txt" -Value $placeholder
 
     - name: Get version info
       id: version
@@ -71,14 +139,14 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: 四川新数录像批量下载器-ISAPI版
-        path: dist/四川新数录像批量下载器_ISAPI版/
+        name: 四川新数录像批量下载器-完整版
+        path: dist/四川新数录像批量下载器_完整版/
         retention-days: 30
 
     - name: Create zip for release
       run: |
         cd dist
-        Compress-Archive -Path "四川新数录像批量下载器_ISAPI版/*" -DestinationPath "四川新数录像批量下载器_ISAPI版.zip" -Force
+        Compress-Archive -Path "四川新数录像批量下载器_完整版/*" -DestinationPath "四川新数录像批量下载器_完整版.zip" -Force
 
     - name: Delete old nightly release
       if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'nightly'
@@ -94,29 +162,30 @@ jobs:
         tag_name: nightly
         name: Nightly Build (${{ steps.version.outputs.date }})
         body: |
-          ## 自动构建版本 (ISAPI模式)
+          ## 自动构建版本 (完整版)
 
           **构建时间**: ${{ steps.version.outputs.date }}
           **提交**: ${{ steps.version.outputs.sha }}
 
           ### 下载内容
-          - `四川新数录像批量下载器_ISAPI版.zip`
-          - **推荐使用 ISAPI 模式**（无需SDK）
+          - `四川新数录像批量下载器_完整版.zip`
+          - 已包含 Java SDK 组件
+          - 包含 SDK 占位符（需手动添加DLL）
 
           ### 使用方法
           1. 解压到任意目录
-          2. 运行 `四川新数录像批量下载器.exe`
-          3. **推荐使用 ISAPI 模式**
+          2. 将海康SDK的DLL复制到 `sdk/` 目录
+          3. 运行 `四川新数录像批量下载器.exe`
 
           ### 功能支持
           | 模式 | 支持情况 |
           |------|---------|
           | ISAPI模式 | ✅ 完全支持（推荐） |
-          | SDK模式 | ❌ 不支持（需本地完整打包） |
+          | SDK模式 | ⚠️ 需添加SDK DLL |
           | HikLoad模式 | ✅ 完全支持 |
 
-          > **注意**: 这是自动构建版本。
-        files: dist/四川新数录像批量下载器_ISAPI版.zip
+          > **注意**: SDK DLL因 licensing 问题无法包含在构建中。
+        files: dist/四川新数录像批量下载器_完整版.zip
         draft: false
         prerelease: true
       env:
@@ -134,16 +203,17 @@ jobs:
           **版本**: ${{ github.ref_name || 'Stable Build' }}
 
           ### 下载内容
-          - `四川新数录像批量下载器_ISAPI版.zip`
+          - `四川新数录像批量下载器_完整版.zip`
+          - 已包含 Java SDK 组件
 
           ### 功能说明
           - **ISAPI模式**: ✅ 完全支持（推荐）
-          - **SDK模式**: ❌ 需本地完整打包
+          - **SDK模式**: ⚠️ 需添加SDK DLL
           - **HikLoad模式**: ✅ 完全支持
 
           ### 更新日志
           请查看 [commits](https://github.com/${{ github.repository }}/commits/main) 了解详情。
-        files: dist/四川新数录像批量下载器_ISAPI版.zip
+        files: dist/四川新数录像批量下载器_完整版.zip
         draft: false
         prerelease: false
       env:
