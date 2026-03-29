@@ -37,48 +37,28 @@ jobs:
         pip install pyinstaller
         pip install -r requirements.txt
 
-    - name: Install Java
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '17'
-
-    - name: Compile Java
-      run: |
-        cd hikvision_java
-        New-Item -ItemType Directory -Path bin -Force
-        javac -encoding UTF-8 -cp "src/main/resources/lib/jna.jar;src/main/resources/lib/examples.jar" -d bin src/main/java/com/hikvision/HikvisionDownloaderCLI.java
-        if (Test-Path "src/main/resources/lib") {
-          Copy-Item -Path "src/main/resources/lib/*" -Destination "bin/" -Recurse -Force
-        }
-
-    - name: Build EXE (without SDK DLL)
+    - name: Build EXE (ISAPI mode, no SDK DLL)
       run: |
         cd hikvision_downloader
         python -m PyInstaller --noconfirm --clean build_github.spec
 
     - name: Create output directory
       run: |
-        New-Item -ItemType Directory -Path "dist/四川新数录像批量下载器_基础版/_internal" -Force -ErrorAction SilentlyContinue
-        New-Item -ItemType Directory -Path "dist/四川新数录像批量下载器_基础版/java" -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path "dist/四川新数录像批量下载器_ISAPI版/_internal" -Force -ErrorAction SilentlyContinue
 
     - name: Copy EXE
       run: |
         $src = "hikvision_downloader/dist/四川新数录像批量下载器/四川新数录像批量下载器.exe"
         if (Test-Path $src) {
-          Copy-Item $src "dist/四川新数录像批量下载器_基础版/" -Force
+          Copy-Item $src "dist/四川新数录像批量下载器_ISAPI版/" -Force
         }
 
     - name: Copy _internal
       run: |
         $src = "hikvision_downloader/dist/四川新数录像批量下载器/_internal"
         if (Test-Path $src) {
-          Copy-Item "$src/*" "dist/四川新数录像批量下载器_基础版/_internal/" -Recurse -Force
+          Copy-Item "$src/*" "dist/四川新数录像批量下载器_ISAPI版/_internal/" -Recurse -Force
         }
-
-    - name: Copy Java files
-      run: |
-        Copy-Item "hikvision_java/bin/*" "dist/四川新数录像批量下载器_基础版/java/" -Recurse -Force
 
     - name: Get version info
       id: version
@@ -91,14 +71,14 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: 四川新数录像批量下载器-基础版
-        path: dist/四川新数录像批量下载器_基础版/
+        name: 四川新数录像批量下载器-ISAPI版
+        path: dist/四川新数录像批量下载器_ISAPI版/
         retention-days: 30
 
     - name: Create zip for release
       run: |
         cd dist
-        Compress-Archive -Path "四川新数录像批量下载器_基础版/*" -DestinationPath "四川新数录像批量下载器_基础版.zip" -Force
+        Compress-Archive -Path "四川新数录像批量下载器_ISAPI版/*" -DestinationPath "四川新数录像批量下载器_ISAPI版.zip" -Force
 
     - name: Delete old nightly release
       if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'nightly'
@@ -114,33 +94,29 @@ jobs:
         tag_name: nightly
         name: Nightly Build (${{ steps.version.outputs.date }})
         body: |
-          ## 自动构建版本
+          ## 自动构建版本 (ISAPI模式)
 
           **构建时间**: ${{ steps.version.outputs.date }}
           **提交**: ${{ steps.version.outputs.sha }}
 
-          ### ⚠️ 重要说明
-          此为基础版，**不包含海康SDK DLL**。如需SDK模式功能，请使用本地完整打包。
-
           ### 下载内容
-          - `四川新数录像批量下载器_基础版.zip`
-          - 已包含 Java SDK 组件
-          - 已包含 Python 依赖
+          - `四川新数录像批量下载器_ISAPI版.zip`
+          - **推荐使用 ISAPI 模式**（无需SDK）
 
           ### 使用方法
           1. 解压到任意目录
           2. 运行 `四川新数录像批量下载器.exe`
-          3. **推荐使用 ISAPI 模式**（无需SDK）
+          3. **推荐使用 ISAPI 模式**
 
           ### 功能支持
           | 模式 | 支持情况 |
           |------|---------|
-          | ISAPI模式 | ✅ 完全支持 |
-          | SDK模式 | ⚠️ 需自行添加SDK DLL |
+          | ISAPI模式 | ✅ 完全支持（推荐） |
+          | SDK模式 | ❌ 不支持（需本地完整打包） |
           | HikLoad模式 | ✅ 完全支持 |
 
-          > **注意**: 这是自动构建版本，可能包含最新但未经充分测试的功能。
-        files: dist/四川新数录像批量下载器_基础版.zip
+          > **注意**: 这是自动构建版本。
+        files: dist/四川新数录像批量下载器_ISAPI版.zip
         draft: false
         prerelease: true
       env:
@@ -157,29 +133,17 @@ jobs:
           **构建时间**: ${{ steps.version.outputs.date }}
           **版本**: ${{ github.ref_name || 'Stable Build' }}
 
-          ### ⚠️ 重要说明
-          此为基础版，**不包含海康SDK DLL**。如需SDK模式功能，请使用本地完整打包。
-
           ### 下载内容
-          - `四川新数录像批量下载器_基础版.zip`
-          - 已包含 Java SDK 组件
-          - 已包含 Python 依赖
+          - `四川新数录像批量下载器_ISAPI版.zip`
 
-          ### 使用方法
-          1. 解压到任意目录
-          2. 运行 `四川新数录像批量下载器.exe`
-          3. **推荐使用 ISAPI 模式**（无需SDK）
-
-          ### 功能支持
-          | 模式 | 支持情况 |
-          |------|---------|
-          | ISAPI模式 | ✅ 完全支持 |
-          | SDK模式 | ⚠️ 需自行添加SDK DLL |
-          | HikLoad模式 | ✅ 完全支持 |
+          ### 功能说明
+          - **ISAPI模式**: ✅ 完全支持（推荐）
+          - **SDK模式**: ❌ 需本地完整打包
+          - **HikLoad模式**: ✅ 完全支持
 
           ### 更新日志
           请查看 [commits](https://github.com/${{ github.repository }}/commits/main) 了解详情。
-        files: dist/四川新数录像批量下载器_基础版.zip
+        files: dist/四川新数录像批量下载器_ISAPI版.zip
         draft: false
         prerelease: false
       env:
