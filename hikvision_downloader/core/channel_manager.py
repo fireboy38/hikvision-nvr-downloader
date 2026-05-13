@@ -31,6 +31,8 @@ class ChannelManagerMixin:
                 ns_options = [
                     'http://www.isapi.org/ver20/XMLSchema',
                     'http://www.hikvision.com/ver20/XMLSchema',
+                    'http://www.isapi.org/ver10/XMLSchema',
+                    'http://www.hikvision.com/ver10/XMLSchema',
                 ]
                 ns = None
                 for ns_opt in ns_options:
@@ -80,6 +82,8 @@ class ChannelManagerMixin:
             ns_options = [
                 'http://www.isapi.org/ver20/XMLSchema',
                 'http://www.hikvision.com/ver20/XMLSchema',
+                'http://www.isapi.org/ver10/XMLSchema',
+                'http://www.hikvision.com/ver10/XMLSchema',
             ]
             ns = None
             for ns_opt in ns_options:
@@ -134,6 +138,8 @@ class ChannelManagerMixin:
             ns_options = [
                 'http://www.isapi.org/ver20/XMLSchema',
                 'http://www.hikvision.com/ver20/XMLSchema',
+                'http://www.isapi.org/ver10/XMLSchema',
+                'http://www.hikvision.com/ver10/XMLSchema',
             ]
             ns = None
             for ns_opt in ns_options:
@@ -223,6 +229,8 @@ class ChannelManagerMixin:
             for ns_opt in [
                 'http://www.isapi.org/ver20/XMLSchema',
                 'http://www.hikvision.com/ver20/XMLSchema',
+                'http://www.isapi.org/ver10/XMLSchema',
+                'http://www.hikvision.com/ver10/XMLSchema',
             ]:
                 if root.find(f'.//{{{ns_opt}}}InputProxyChannelStatus') is not None:
                     ns = ns_opt
@@ -310,6 +318,8 @@ class ChannelManagerMixin:
             ns_options = [
                 'http://www.isapi.org/ver20/XMLSchema',
                 'http://www.hikvision.com/ver20/XMLSchema',
+                'http://www.isapi.org/ver10/XMLSchema',
+                'http://www.hikvision.com/ver10/XMLSchema',
             ]
             ns = None
             for ns_opt in ns_options:

@@ -35,6 +35,14 @@ from .isapi_downloader import ISAPIDownloaderMixin
 class HikvisionISAPIBase:
     """海康ISAPI基类：仅包含会话管理和通用工具"""
 
+    # 通用命名空间列表（按优先级排序，覆盖所有已知固件版本）
+    NAMESPACES = [
+        'http://www.isapi.org/ver20/XMLSchema',
+        'http://www.hikvision.com/ver20/XMLSchema',
+        'http://www.isapi.org/ver10/XMLSchema',
+        'http://www.hikvision.com/ver10/XMLSchema',
+    ]
+
     def __init__(self, host: str, port: int = 80,
                  username: str = "admin", password: str = "admin"):
         self.host     = host
@@ -48,13 +56,35 @@ class HikvisionISAPIBase:
             'User-Agent': 'HikvisionClient/1.0',
             'Accept': '*/*',
         })
+        # 优先使用 Digest Auth，不兼容时回退到 Basic Auth
         self.session.auth = HTTPDigestAuth(username, password)
+        self._auth_mode = 'digest'  # 跟踪当前认证模式
+
+    def _try_request(self, url: str, timeout: int = 15, **kwargs) -> requests.Response:
+        """发送HTTP请求，自动处理认证回退（Digest -> Basic）
+        
+        很多海康NVR（特别是老固件或特殊型号）不支持 Digest Auth，
+        只支持 Basic Auth。此方法在 Digest Auth 返回 401 时，
+        自动回退到 Basic Auth 重试。
+        """
+        resp = self.session.get(url, timeout=timeout, **kwargs)
+        if resp.status_code == 401 and self._auth_mode == 'digest':
+            # Digest Auth 失败，回退到 Basic Auth
+            print(f"[ISAPI] Digest Auth 返回 401，回退到 Basic Auth")
+            self.session.auth = HTTPBasicAuth(self.username, self.password)
+            self._auth_mode = 'basic'
+            resp = self.session.get(url, timeout=timeout, **kwargs)
+        return resp
 
     def test_connection(self) -> Tuple[bool, str]:
-        """测试ISAPI连接，返回 (success, device_model)"""
+        """测试ISAPI连接，返回 (success, device_model)
+        
+        支持自动认证回退：先尝试 Digest Auth，失败后回退到 Basic Auth。
+        兼容所有海康固件版本。
+        """
         try:
             url = f"{self.base_url}/ISAPI/System/deviceInfo"
-            resp = self.session.get(url, timeout=8)
+            resp = self._try_request(url, timeout=15)
             if resp.status_code == 200:
                 model = self._parse_xml_text(resp.text, 'model')
                 return True, model or "NVR设备"
@@ -70,13 +100,16 @@ class HikvisionISAPIBase:
             return False, str(e)
 
     def _parse_xml_text(self, xml_str: str, tag: str) -> Optional[str]:
-        """从XML字符串提取指定标签的文本"""
+        """从XML字符串提取指定标签的文本（兼容所有已知命名空间）"""
         try:
             root = ET.fromstring(xml_str)
-            ns = 'http://www.hikvision.com/ver20/XMLSchema'
-            el = root.find(f'.//{{{ns}}}{tag}')
-            if el is None:
-                el = root.find(f'.//{tag}')
+            # 按优先级尝试所有已知命名空间
+            for ns in self.NAMESPACES:
+                el = root.find(f'.//{{{ns}}}{tag}')
+                if el is not None:
+                    return el.text
+            # 不带命名空间也尝试
+            el = root.find(f'.//{tag}')
             return el.text if el is not None else None
         except Exception:
             return None

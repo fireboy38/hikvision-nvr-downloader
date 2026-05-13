@@ -191,8 +191,20 @@ ERROR_CODES = {
 _sdk_init_called = False
 _sdk_lock = threading.Lock()
 
+# 全局 DLL 加载锁（防止多线程并发加载 DLL 和 os.chdir 冲突）
+_dll_load_lock = threading.Lock()
+# 全局 DLL 实例（同一进程只加载一次）
+_global_dll = None
+
 class HCNetSDK:
-    """海康SDK封装类（线程安全）"""
+    """海康SDK封装类（线程安全，全局单例DLL）
+    
+    重要修复：
+    1. DLL 全局只加载一次（避免多实例重复加载导致内存泄漏和句柄冲突）
+    2. os.chdir 使用线程锁保护（避免多线程并发切换工作目录）
+    3. 连接超时从 3秒 提升到 10秒（兼容高延迟网络）
+    4. ISAPI 认证支持 Digest -> Basic 自动回退
+    """
 
     def __init__(self):
         self.sdk = None
@@ -209,25 +221,46 @@ class HCNetSDK:
     # ------------------------------------------------------------------ #
 
     def _load_sdk(self):
-        """加载SDK DLL，自动切换工作目录确保依赖可找到"""
+        """加载SDK DLL（全局单例，线程安全）
+        
+        修复：
+        - 使用全局锁保护 os.chdir，防止多线程并发切换工作目录
+        - DLL 全局只加载一次，多个 HCNetSDK 实例共享同一 DLL
+        """
+        global _global_dll
+        
+        # 如果 DLL 已加载，直接复用
+        if _global_dll is not None:
+            self.sdk = _global_dll
+            print(f"[SDK] 复用已加载的全局 DLL 实例")
+            return
+        
         sdk_dll = os.path.join(SDK_PATH, "HCNetSDK.dll")
         if not os.path.exists(sdk_dll):
             raise FileNotFoundError(f"SDK DLL不存在: {sdk_dll}")
 
-        # 保存当前工作目录
-        old_cwd = os.getcwd()
-        
-        try:
-            # 必须先切换工作目录到SDK所在目录（让DLL都能找到依赖）
-            os.chdir(SDK_PATH)
-            self.sdk = ctypes.CDLL(sdk_dll)
-            print(f"[SDK] 已加载: {sdk_dll}")
-            print(f"[SDK] 工作目录: {SDK_PATH}")
-            self._setup_functions()
-        finally:
-            # 恢复工作目录
-            os.chdir(old_cwd)
-            print(f"[SDK] 恢复工作目录: {old_cwd}")
+        # 使用全局锁保护 os.chdir（线程安全）
+        with _dll_load_lock:
+            # 二次检查（可能其他线程已加载）
+            if _global_dll is not None:
+                self.sdk = _global_dll
+                return
+            
+            # 保存当前工作目录
+            old_cwd = os.getcwd()
+            
+            try:
+                # 必须先切换工作目录到SDK所在目录（让DLL都能找到依赖）
+                os.chdir(SDK_PATH)
+                _global_dll = ctypes.CDLL(sdk_dll)
+                self.sdk = _global_dll
+                print(f"[SDK] 已加载: {sdk_dll}")
+                print(f"[SDK] 工作目录: {SDK_PATH}")
+                self._setup_functions()
+            finally:
+                # 恢复工作目录
+                os.chdir(old_cwd)
+                print(f"[SDK] 恢复工作目录: {old_cwd}")
 
     def _setup_functions(self):
         """声明所有SDK函数原型（避免ctypes默认int返回值截断）"""
@@ -352,10 +385,11 @@ class HCNetSDK:
             _sdk_init_called = True
             
             # 初始化成功后设置连接参数
+            # 修复：超时从3秒提升到10秒，兼容高延迟网络（跨网段、VPN等）
             print(f"[SDK] 设置连接参数...")
-            self.sdk.NET_DVR_SetConnectTime(3000, 3)
-            self.sdk.NET_DVR_SetReconnect(10000, True)
-            print(f"[SDK] 连接参数设置完成")
+            self.sdk.NET_DVR_SetConnectTime(10000, 3)   # 10秒超时，3次重试
+            self.sdk.NET_DVR_SetReconnect(10000, True)   # 10秒重连
+            print(f"[SDK] 连接参数设置完成（超时10秒）")
             return True, "SDK初始化成功"
 
     def cleanup(self, force=False):
@@ -799,12 +833,32 @@ def _fetch_channel_info_isapi(
     """
     import requests
     import xml.etree.ElementTree as ET
-    from requests.auth import HTTPDigestAuth
+    from requests.auth import HTTPDigestAuth, HTTPBasicAuth
 
     session = requests.Session()
     session.headers.update({'Accept': '*/*'})
-    # 使用 Digest Auth（新固件强制要求；老固件也兼容）
+    # 修复：优先使用 Digest Auth，401 时自动回退到 Basic Auth
     session.auth = HTTPDigestAuth(username, password)
+    _isapi_auth_mode = 'digest'
+
+    def _isapi_request(url, timeout=15):
+        """ISAPI 请求，支持 Digest -> Basic 认证自动回退"""
+        nonlocal _isapi_auth_mode
+        resp = session.get(url, timeout=timeout)
+        if resp.status_code == 401 and _isapi_auth_mode == 'digest':
+            print(f"[ISAPI] Digest Auth 返回 401，回退到 Basic Auth")
+            session.auth = HTTPBasicAuth(username, password)
+            _isapi_auth_mode = 'basic'
+            resp = session.get(url, timeout=timeout)
+        return resp
+
+    # 所有已知命名空间（覆盖 ver10 和 ver20）
+    all_namespaces = [
+        'http://www.isapi.org/ver20/XMLSchema',
+        'http://www.hikvision.com/ver20/XMLSchema',
+        'http://www.isapi.org/ver10/XMLSchema',
+        'http://www.hikvision.com/ver10/XMLSchema',
+    ]
 
     channel_info: Dict[int, Dict] = {}
 
@@ -812,15 +866,12 @@ def _fetch_channel_info_isapi(
     url = f"http://{host}:{port}/ISAPI/ContentMgmt/InputProxy/channels"
     has_conn_status = False
     try:
-        resp = session.get(url, timeout=10)
+        resp = _isapi_request(url, timeout=15)
         if resp.status_code == 200:
             root = ET.fromstring(resp.text)
 
             ns = None
-            for ns_opt in [
-                'http://www.isapi.org/ver20/XMLSchema',
-                'http://www.hikvision.com/ver20/XMLSchema',
-            ]:
+            for ns_opt in all_namespaces:
                 if root.find(f'.//{{{ns_opt}}}InputProxyChannel') is not None:
                     ns = ns_opt
                     print(f"[ISAPI] 检测到命名空间: {ns}")
@@ -842,7 +893,7 @@ def _fetch_channel_info_isapi(
                         # 老固件：直接包含状态
                         has_conn_status = True
                         status = (stat_el.text or 'unknown').strip().lower()
-                        online = (status == 'online')
+                        online = (status == 'online') or (status == 'connected') or (status == 'connect')
                     else:
                         # 新固件：暂时占位，后续用 /channels/status 覆盖
                         status = 'unknown'
@@ -863,7 +914,7 @@ def _fetch_channel_info_isapi(
 
             # 如果通道配置里没有 connectionStatus，调用专用 status 接口补充在线状态
             if channel_info and not has_conn_status:
-                _enrich_channel_status(session, host, port, channel_info)
+                _enrich_channel_status(session, host, port, channel_info, _isapi_request)
 
     except Exception as e:
         print(f"[ISAPI] InputProxy请求失败: {e}")
@@ -872,15 +923,12 @@ def _fetch_channel_info_isapi(
     if not channel_info:
         url2 = f"http://{host}:{port}/ISAPI/Streaming/channels"
         try:
-            resp2 = session.get(url2, timeout=10)
+            resp2 = _isapi_request(url2, timeout=15)
             if resp2.status_code == 200:
                 root2 = ET.fromstring(resp2.text)
 
                 ns2 = None
-                for ns_opt in [
-                    'http://www.isapi.org/ver20/XMLSchema',
-                    'http://www.hikvision.com/ver20/XMLSchema',
-                ]:
+                for ns_opt in all_namespaces:
                     if root2.find(f'.//{{{ns_opt}}}StreamingChannel') is not None:
                         ns2 = ns_opt
                         print(f"[ISAPI] Streaming检测到命名空间: {ns2}")
@@ -920,26 +968,37 @@ def _fetch_channel_info_isapi(
 
 
 def _enrich_channel_status(
-    session, host: str, port: int, channels: Dict[int, Dict]
+    session, host: str, port: int, channels: Dict[int, Dict],
+    request_fn=None
 ) -> None:
     """
     从 /ISAPI/ContentMgmt/InputProxy/channels/status 补充在线状态
     新固件使用 <online>true/false</online> 字段
     直接修改传入的 channels 字典
+    
+    修复：支持 Digest -> Basic 认证回退，增加 ver10 命名空间
     """
     import xml.etree.ElementTree as ET
     try:
         url  = f"http://{host}:{port}/ISAPI/ContentMgmt/InputProxy/channels/status"
-        resp = session.get(url, timeout=15)
+        # 修复：使用带认证回退的请求函数
+        if request_fn is not None:
+            resp = request_fn(url, timeout=15)
+        else:
+            resp = session.get(url, timeout=15)
         if resp.status_code != 200:
             return
 
         root = ET.fromstring(resp.text)
-        ns = None
-        for ns_opt in [
+        # 修复：增加 ver10 命名空间支持
+        all_namespaces = [
             'http://www.isapi.org/ver20/XMLSchema',
             'http://www.hikvision.com/ver20/XMLSchema',
-        ]:
+            'http://www.isapi.org/ver10/XMLSchema',
+            'http://www.hikvision.com/ver10/XMLSchema',
+        ]
+        ns = None
+        for ns_opt in all_namespaces:
             if root.find(f'.//{{{ns_opt}}}InputProxyChannelStatus') is not None:
                 ns = ns_opt
                 break
@@ -961,7 +1020,7 @@ def _enrich_channel_status(
                     channels[no]['status'] = 'online' if online else 'offline'
                 elif detect_el is not None:
                     detect = (detect_el.text or '').strip().lower()
-                    online = (detect == 'connect')
+                    online = (detect in ('connect', 'connected', 'online'))
                     channels[no]['online'] = online
                     channels[no]['status'] = detect
             except Exception:

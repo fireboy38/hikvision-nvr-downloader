@@ -19,14 +19,16 @@ class DeviceInfoMixin:
         info = {}
         try:
             url = f"{self.base_url}/ISAPI/System/deviceInfo"
-            resp = self.session.get(url, timeout=8)
+            resp = self.session.get(url, timeout=15)
             if resp.status_code == 200:
                 root = ET.fromstring(resp.text)
 
-                # 尝试多个命名空间
+                # 尝试多个命名空间（覆盖 ver10 和 ver20）
                 namespaces = [
                     'http://www.isapi.org/ver20/XMLSchema',
                     'http://www.hikvision.com/ver20/XMLSchema',
+                    'http://www.isapi.org/ver10/XMLSchema',
+                    'http://www.hikvision.com/ver10/XMLSchema',
                 ]
 
                 for ns in namespaces:
@@ -52,7 +54,7 @@ class DeviceInfoMixin:
         hdd_list = []
         try:
             url = f"{self.base_url}/ISAPI/ContentMgmt/Storage"
-            resp = self.session.get(url, timeout=8)
+            resp = self.session.get(url, timeout=15)
             if resp.status_code != 200:
                 print(f"[ISAPI] 获取硬盘信息失败: HTTP {resp.status_code}")
                 return hdd_list
@@ -63,6 +65,8 @@ class DeviceInfoMixin:
             namespaces = [
                 'http://www.isapi.org/ver20/XMLSchema',
                 'http://www.hikvision.com/ver20/XMLSchema',
+                'http://www.isapi.org/ver10/XMLSchema',
+                'http://www.hikvision.com/ver10/XMLSchema',
             ]
 
             # 查找所有硬盘节点 <hdd>
@@ -142,16 +146,18 @@ class DeviceInfoMixin:
         status = {}
         try:
             url = f"{self.base_url}/ISAPI/System/status"
-            resp = self.session.get(url, timeout=8)
+            resp = self.session.get(url, timeout=15)
             if resp.status_code != 200:
                 return status
 
             root = ET.fromstring(resp.text)
 
-            # 尝试多个命名空间
+            # 尝试多个命名空间（覆盖 ver10 和 ver20）
             namespaces = [
                 'http://www.isapi.org/ver20/XMLSchema',
                 'http://www.hikvision.com/ver20/XMLSchema',
+                'http://www.isapi.org/ver10/XMLSchema',
+                'http://www.hikvision.com/ver10/XMLSchema',
             ]
 
             for ns in namespaces:
@@ -322,7 +328,7 @@ class DeviceInfoMixin:
             # 添加调试信息：打印原始响应和解析结果
             try:
                 url = f"{self.base_url}/ISAPI/System/status"
-                resp = self.session.get(url, timeout=8)
+                resp = self.session.get(url, timeout=15)
                 print(f"[ISAPI DEBUG] System Status Response: {resp.text[:800]}")
                 print(f"[ISAPI DEBUG] Parsed status: {status}")
             except:
@@ -338,13 +344,15 @@ class DeviceInfoMixin:
         bond_info = {}
         try:
             url = f"{self.base_url}/ISAPI/System/Network/Bond"
-            resp = self.session.get(url, timeout=8)
+            resp = self.session.get(url, timeout=15)
             if resp.status_code == 200:
                 root = ET.fromstring(resp.text)
 
                 namespaces = [
                     'http://www.isapi.org/ver20/XMLSchema',
                     'http://www.hikvision.com/ver20/XMLSchema',
+                    'http://www.isapi.org/ver10/XMLSchema',
+                    'http://www.hikvision.com/ver10/XMLSchema',
                 ]
 
                 for ns in namespaces:
@@ -432,13 +440,15 @@ class DeviceInfoMixin:
         interfaces = []
         try:
             url = f"{self.base_url}/ISAPI/System/Network/interfaces"
-            resp = self.session.get(url, timeout=8)
+            resp = self.session.get(url, timeout=15)
             if resp.status_code == 200:
                 root = ET.fromstring(resp.text)
 
                 namespaces = [
                     'http://www.isapi.org/ver20/XMLSchema',
                     'http://www.hikvision.com/ver20/XMLSchema',
+                    'http://www.isapi.org/ver10/XMLSchema',
+                    'http://www.hikvision.com/ver10/XMLSchema',
                 ]
 
                 for ns in namespaces:
